@@ -1,6 +1,8 @@
-# <img src="images/icon.png" alt="Claude Notifications" width="36" align="top" /> Claude Notifications
+# Claude Notifications
 
-**All-in-one Claude Code notification system — sound alerts, OS notifications, and terminal focus. One-click setup, zero external dependencies.**
+**All-in-one Claude Code notification system — sound alerts, OS notifications, and terminal focus. Zero-interaction setup, fully customizable.**
+
+![Demo](images/demo.gif)
 
 When running multiple Claude Code sessions across different VS Code windows and terminals:
 
@@ -15,13 +17,19 @@ Works on **macOS**, **Windows**, and **Linux** with multiple VS Code windows and
 1. **Install** from the VS Code Marketplace:
    - Extensions (Ctrl/Cmd+Shift+X) → Search **"Claude Notifications"** → Install
 
-2. **Set up hooks** — on first activation, the extension will prompt you:
+2. **That's it.** Hooks are installed automatically on first activation — no prompts, no clicks. You'll see a confirmation toast and the status bar shows `$(bell) Claude: Notify`.
 
-   > *"Set up Claude Code hooks for automatic notifications?"* → **Set Up Now**
+   If you ever need to re-install: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**
 
-   That's it. The extension installs everything automatically.
+## What's New in v3.0
 
-   Or run manually: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**
+- **Exactly one notification per event** — smart handshake between hook and extension eliminates duplicate notifications. No more double-bang.
+- **Two-type event model** — `waiting` (Claude needs your response) and `completed` (task finished). Simpler settings, clearer copy.
+- **Per-event sounds** — choose different sounds for each event type. Pick from bundled sounds, OS system sounds, or your own audio files.
+- **Smart three-tier behavior** — sound only when already on the right terminal; in-window toast when on the wrong tab; OS notification when in a different app.
+- **macOS terminal-notifier setup** — one-time prompt + re-runnable command + Settings UI button. Recommended for best experience.
+- **Zero-interaction setup** — hooks install automatically. Stale paths auto-fix on extension update.
+- **Tiny package** — bundled with esbuild, down from 3.2 MB to ~100 KB.
 
 ## How It Works
 
@@ -32,38 +40,71 @@ Claude needs input / finishes task / needs permission
 Claude Code fires Stop, Notification, or PermissionRequest hook
        │
        ▼
-hook.js runs OUTSIDE VS Code:
+hook.js writes signal file → waits 1.2s for extension to claim
        │
-       ├── Writes JSON signal file (.vscode/.claude-focus)
-       ├── Plays sound (platform-native: afplay / PowerShell / paplay)
-       └── Shows OS notification (terminal-notifier / Windows toast / notify-send)
-                │
-                ▼ (user clicks notification)
-                │
-                └── Opens the correct VS Code window (via code CLI / vscode:// URI)
-                         │
-                         ▼
-                    Extension detects signal file → focuses the correct terminal tab
+       ├── Extension claims (VS Code is focused):
+       │     ├─ Correct terminal? → sound only (configurable)
+       │     └─ Wrong terminal?   → sound + in-window toast
+       │
+       └── Extension doesn't claim (VS Code not focused / closed):
+             └─ hook.js fires OS banner + sound (fallback)
 ```
 
-**Key design**: Sound and notifications are handled by the hook script (outside VS Code), not by the extension. This means notifications work reliably regardless of which VS Code window is focused, or even if you're in a completely different application.
+**Key design**: Exactly one notification path fires per event — never zero, never two. The extension and hook coordinate via a claim marker file.
+
+## Focus Behavior
+
+The extension **never changes terminal focus without an explicit user action**:
+- Clicking **"Focus Terminal"** on an in-window toast
+- Clicking an **OS notification** (which focuses the VS Code window; the toast still requires a click)
+
+You will never lose your place in a terminal because of a notification.
 
 ## Status Bar
 
-The extension adds a status bar item showing the current notification state:
+The extension adds a status bar item with three states:
 
-- `$(bell) Claude: Notify` — notifications active
-- `$(bell-slash) Claude: Muted` — notifications muted
+- `$(gear) Claude: Set Up` — hooks not installed (click to install)
+- `$(bell) Claude: Notify` — notifications active (click to mute)
+- `$(bell-slash) Claude: Muted` — notifications muted (click to unmute)
 
-Click it to toggle mute. When muted, signal files are still written (for terminal focus) but no sound or notification is shown.
+When muted, signal files are still written (for terminal focus) but no sound or notification is shown.
 
 ## Settings
 
+### Events
+
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `claudeNotifications.sound.enabled` | `true` | Play a sound on notifications |
-| `claudeNotifications.sound.volume` | `0.5` | Sound volume 0.0–1.0 (macOS/Linux) |
-| `claudeNotifications.autoSetupHooks` | `true` | Prompt to install hooks on first run |
+| `events.waiting` | `Sound + Notification` | When Claude needs your response (Notification + Permission events) |
+| `events.completed` | `Sound + Notification` | When Claude finishes a task (Stop event) |
+
+Options: `Sound + Notification` | `Sound only` | `Notification only` | `Nothing`
+
+### Sounds
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sounds.waiting` | `bundled:notification` | Sound for "waiting" events. Values: `bundled:*`, `system:<name>`, `custom`, `none` |
+| `sounds.waitingPath` | | Custom file path (when set to `custom`) |
+| `sounds.completed` | `bundled:task-complete` | Sound for "completed" events |
+| `sounds.completedPath` | | Custom file path (when set to `custom`) |
+| `sounds.volume` | `50` | Sound volume (0–100) |
+
+### Behavior
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `soundWhenFocused` | `sound` | What to do when already on the correct terminal: `sound` or `nothing` |
+| `autoSetupHooks` | `true` | Prompt to upgrade legacy shell-script hooks |
+
+### macOS
+
+| Setting | Description |
+|---------|-------------|
+| `macOS.setup` | Click to install `terminal-notifier` for click-to-open banners. Recommended for best experience. |
+
+All settings are prefixed with `claudeNotifications.` — e.g., `claudeNotifications.sounds.volume`.
 
 ## Commands
 
@@ -71,33 +112,35 @@ Open the command palette (`Ctrl/Cmd+Shift+P`) and search for:
 
 | Command | Description |
 |---------|-------------|
-| **Claude Notifications: Set Up Claude Code Hooks** | Install hooks in `~/.claude/settings.json` |
-| **Claude Notifications: Remove Claude Code Hooks** | Remove hooks (keeps other settings intact) |
-| **Claude Notifications: Add Signal Files to Global Gitignore** | Prevent signal files from showing in git |
-| **Claude Notifications: Test Notification** | Send a test notification to verify your setup |
-| **Claude Notifications: Toggle Mute** | Mute/unmute notifications (also available via status bar) |
+| **Set Up Claude Code Hooks** | Install hooks in `~/.claude/settings.json` |
+| **Remove Claude Code Hooks** | Remove hooks (keeps other settings intact) |
+| **Add Signal Files to Global Gitignore** | Prevent signal files from showing in git |
+| **Test Notification** | Send a test notification to verify your setup |
+| **Toggle Mute** | Mute/unmute notifications (also via status bar) |
+| **Choose Sound** | Browse bundled, system, and custom sounds per event |
+| **Preview Sound** | Listen to any available sound without changing settings |
+| **Set Up macOS terminal-notifier** | Install terminal-notifier via Homebrew (macOS only) |
 
 ## Monitored Events
 
-The extension monitors three Claude Code events:
+The extension monitors three Claude Code hook events, grouped into two types:
 
-| Event | When it fires | Notification |
-|-------|--------------|-------------|
-| **Stop** | Claude finishes a task | "Task completed in: {project}" + Glass sound |
-| **Notification** | Claude needs your input | "Waiting for your response in: {project}" + Funk sound |
-| **PermissionRequest** | Claude needs permission | "Permission needed in: {project}" + Funk sound |
+| Type | Hook Events | Notification |
+|------|------------|-------------|
+| **Waiting** | Notification, PermissionRequest | "Waiting for your response in: {project}" + Funk sound |
+| **Completed** | Stop | "Task completed in: {project}" + Glass sound |
 
-## macOS Note
+## macOS Setup
 
-For the best click-to-open experience on macOS, install `terminal-notifier`:
+For the best click-to-open experience on macOS, install `terminal-notifier`. The extension will prompt you on first activation, or you can run it anytime:
 
-```bash
-brew install terminal-notifier
-```
+`Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up macOS terminal-notifier (Recommended)"**
 
-Then: **System Settings → Notifications → terminal-notifier** → set to **Alerts**.
+You can also find the setup link in Settings under **Claude Notifications > macOS: Setup**.
 
-Without it, the extension falls back to `osascript` notifications (which work but don't support click-to-open-VS Code).
+After installing: **System Settings → Notifications → terminal-notifier** → set to **Alerts**.
+
+Without terminal-notifier, the extension falls back to `osascript` notifications (which work but don't support click-to-open).
 
 ## Upgrading from v1.x
 
@@ -106,15 +149,15 @@ If you previously used the shell-script based setup:
 1. The extension will detect your legacy hooks and offer to upgrade automatically
 2. Choosing **"Replace"** removes the old shell hooks and installs the new Node.js hook
 3. You can safely delete the old scripts (`~/.claude/notify.sh`, `~/.claude/task-complete.sh`, etc.)
-4. `terminal-notifier` is still useful on macOS for click-to-open (but no longer required)
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | No notifications | Run **"Test Notification"** from the command palette |
-| No sound | Check Settings → `claudeNotifications.sound.enabled` and status bar mute state |
-| Notification doesn't open VS Code | macOS: install `terminal-notifier` (`brew install terminal-notifier`). Windows: VS Code registers `vscode://` URI automatically. |
+| No sound | Check `claudeNotifications.events.*` settings and status bar mute state |
+| Double notifications | Update to v3.0 — the handshake dedup eliminates this |
+| Notification doesn't open VS Code | macOS: run **"Set Up macOS terminal-notifier"** command. Windows: automatic via `vscode://` URI. |
 | Extension not activating | Output panel → "Claude Notifications" dropdown |
 | Wrong terminal focused | Check Output panel PID matching logs |
 | Hooks not firing | Run **"Set Up Claude Code Hooks"** command. Restart Claude Code after setup. |
@@ -127,8 +170,9 @@ The extension ships a `hook.js` file that Claude Code runs when it needs your at
 2. Finds the VS Code workspace root (walks up looking for `.vscode/`)
 3. Builds a PID ancestor chain (for terminal tab matching)
 4. Writes a JSON signal file to `.vscode/.claude-focus`
-5. Plays a sound using platform-native commands
-6. Shows an OS notification using platform-native commands
+5. Waits 1.2 seconds for the extension to claim the signal
+6. If claimed: exits silently (extension handled it)
+7. If not claimed: plays sound + shows OS notification (fallback)
 
 The script is pure Node.js with no npm dependencies — it works identically on macOS, Windows, and Linux.
 
