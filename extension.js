@@ -337,31 +337,35 @@ async function describeTerminal(terminal, index) {
 
 async function focusMatchingTerminal(pids, log) {
   const terminals = vscode.window.terminals;
-  log.appendLine(`Open terminals (${terminals.length}): ${terminals.map(t => t.name).join(', ')}`);
+  const descriptions = await Promise.all(terminals.map((t, i) => describeTerminal(t, i)));
+  log.appendLine(`Open terminals (${terminals.length}): ${descriptions.join(', ')}`);
 
-  for (const terminal of terminals) {
+  for (let i = 0; i < terminals.length; i++) {
+    const terminal = terminals[i];
     try {
       const termPid = await terminal.processId;
       if (termPid && pids.includes(termPid)) {
-        log.appendLine(`PID match: "${terminal.name}" (PID ${termPid})`);
+        log.appendLine(`PID match: ${await describeTerminal(terminal, i)}`);
         await showTerminal(terminal, log);
         return;
       }
     } catch (_) {}
   }
 
-  for (const terminal of terminals) {
+  for (let i = 0; i < terminals.length; i++) {
+    const terminal = terminals[i];
     const name = terminal.name.toLowerCase();
     if (name.includes('claude') || name.includes('node')) {
-      log.appendLine(`Name match: "${terminal.name}"`);
+      log.appendLine(`Name match: ${await describeTerminal(terminal, i)}`);
       await showTerminal(terminal, log);
       return;
     }
   }
 
   if (terminals.length > 0) {
-    const lastTerminal = terminals[terminals.length - 1];
-    log.appendLine(`Fallback: last terminal "${lastTerminal.name}"`);
+    const lastIndex = terminals.length - 1;
+    const lastTerminal = terminals[lastIndex];
+    log.appendLine(`Fallback: last terminal ${await describeTerminal(lastTerminal, lastIndex)}`);
     await showTerminal(lastTerminal, log);
     return;
   }
