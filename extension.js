@@ -1,32 +1,43 @@
-// extension.js — Claude Notifications v3.0
-// hook.js handles OS banner + sound as fallback (runs outside VS Code).
-// This extension handles: claim-based dedup, terminal focusing, status bar, settings sync, commands.
+// extension.js — Claude Notifications v3.1
+// hook.js handles OS banner + sound as a fallback (runs outside VS Code).
+// This extension handles: atomic claim-based dedup, terminal focusing,
+// status bar, settings sync, and commands.
 //
-// FOCUS CONTRACT: This extension never changes terminal focus without an explicit user press —
-// either the "Focus Terminal" button on an in-window toast or an OS banner click.
+// FOCUS CONTRACT: This extension never changes terminal focus without an
+// explicit user press — either the "Focus Terminal" button on an in-window
+// toast or an OS banner click.
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { getSignalPath, getClickedPath, getClaimedPath, parseSignal, CLAIMED_FILE, SIGNAL_DIR } = require('./lib/signals');
+const {
+  getSignalPath,
+  getClickedPath,
+  getClaimedPath,
+  claimHandled,
+  parseSignal,
+  CLAIM_STALE_MS
+} = require('./lib/signals');
 const { checkHookStatus, installHooks, uninstallHooks } = require('./lib/hooks-installer');
 const { checkGitignoreStatus, setupGitignore } = require('./lib/gitignore-setup');
 const { playSound, playSoundFile, resolveSoundPath, discoverSystemSounds } = require('./lib/sounds');
 
 const POLL_MS = 400;
-const CLAIM_STALE_MS = 5000;
+const SWEEP_FIRED_MS = 8000;        // delete fired signal files older than this
+const LEGACY_EXTENSION_ID = 'dimokol.claude-terminal-focus';
 const CONFIG_FILE = 'claude-notifications-config.json';
 
 // Module-level shared state (set during activate)
 let _statusBarItem = null;
-let _extensionPath = null;
+let _terminalNotifierCached = null;  // cached detection, invalidated on command
 
 function activate(context) {
   const log = vscode.window.createOutputChannel('Claude Notifications');
-  log.appendLine('Claude Notifications v3.0 activated');
+  log.appendLine('Claude Notifications v3.1 activated');
   log.appendLine(`Workspace folders: ${(vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath).join(', ') || 'none'}`);
 
-  _extensionPath = context.extensionPath;
+  // --- Detect legacy extension (primary cause of duplicate toasts) ---
+  warnIfLegacyExtensionActive(context, log);
 
   // --- Status bar ---
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -50,7 +61,7 @@ function activate(context) {
       log.appendLine(`Notifications ${state}`);
       vscode.window.showInformationMessage(`Claude Notifications: ${config.muted ? 'Muted' : 'Unmuted'}`);
     }),
-    vscode.commands.registerCommand('claudeNotifications.chooseSound', () => cmdChooseSound(context, log)),
+    vscode.commands.registerCommand('claudeNotifications.chooseSound', (event) => cmdChooseSound(context, log, event)),
     vscode.commands.registerCommand('claudeNotifications.previewSound', () => cmdPreviewSound(context, log)),
     vscode.commands.registerCommand('claudeNotifications.setupMacNotifier', () => cmdSetupMacNotifier(context, log))
   );
@@ -60,24 +71,29 @@ function activate(context) {
     if (!vscode.workspace.workspaceFolders) return;
 
     for (const folder of vscode.workspace.workspaceFolders) {
-      // Sweep stale claim markers
-      sweepStaleClaims(folder.uri.fsPath);
+      const workspaceRoot = folder.uri.fsPath;
 
-      // Check for v1-style clicked marker (backwards compat with terminal-notifier)
-      const clickedPath = getClickedPath(folder.uri.fsPath);
+      // Sweep stale claim markers
+      sweepStaleFile(getClaimedPath(workspaceRoot), CLAIM_STALE_MS);
+      // Sweep fired signal files (they outlive the claim marker but should
+      // still be cleaned up eventually so they don't accumulate).
+      sweepFiredSignal(workspaceRoot);
+
+      // Click-to-focus: OS banner click produced a "clicked" marker via
+      // terminal-notifier's -execute. Focus the terminal silently — the
+      // user already gave explicit intent by clicking.
+      const clickedPath = getClickedPath(workspaceRoot);
       if (fs.existsSync(clickedPath)) {
-        log.appendLine(`Clicked marker found (v1 compat) — ${folder.name}`);
-        try { fs.unlinkSync(clickedPath); } catch (_) {}
-        const signalPath = getSignalPath(folder.uri.fsPath);
-        handleSignal(signalPath, folder.uri.fsPath, log);
+        log.appendLine(`Clicked marker found — ${folder.name}`);
+        handleClickedSignal(workspaceRoot, log);
         return;
       }
 
-      // Check for signal file
-      const signalPath = getSignalPath(folder.uri.fsPath);
+      // Normal signal: only react when pending. Fired signals are ignored
+      // here (hook.js already fired the OS banner).
+      const signalPath = getSignalPath(workspaceRoot);
       if (fs.existsSync(signalPath)) {
-        log.appendLine(`Signal file found — ${folder.name}`);
-        handleSignal(signalPath, folder.uri.fsPath, log);
+        handleSignal(signalPath, workspaceRoot, log);
         return;
       }
     }
@@ -110,68 +126,72 @@ function activate(context) {
     })
   );
 
-  // --- macOS terminal-notifier setup prompt ---
+  // --- macOS terminal-notifier setup prompt (one-time) ---
   promptMacNotifierSetup(context, log);
 
   log.appendLine(`Polling every ${POLL_MS}ms for signals`);
   log.appendLine('Ready');
 }
 
-// --- Signal handling (focus-gated claim) ---
+// --- Signal handling (atomic claim-based) ---
 
 async function handleSignal(signalPath, workspaceRoot, log) {
-  // Read signal content
   let content;
   try {
     content = fs.readFileSync(signalPath, 'utf8').trim();
   } catch (err) {
-    log.appendLine(`Could not read signal file: ${err.message}`);
-    return;
+    return; // signal file disappeared, nothing to do
   }
 
   const signal = parseSignal(content);
   if (!signal) {
-    log.appendLine('Signal file was empty or stale — ignoring');
+    log.appendLine('Signal file was empty or stale — removing');
     try { fs.unlinkSync(signalPath); } catch (_) {}
     return;
   }
 
+  // Already fired by hook.js — ignore. Cleanup happens in sweepFiredSignal.
+  if (signal.state === 'fired') return;
+
   log.appendLine(`Signal: event=${signal.event}, project=${signal.project}, pids=[${signal.pids.join(',')}], version=${signal.version}`);
 
-  // Read config for per-event settings
   const config = readConfig();
   const eventSetting = (config.events && config.events[signal.event]) || 'Sound + Notification';
 
-  // If this window is NOT focused, do NOT claim — let hook.js fire the OS banner.
-  // This ensures the correct VS Code window gets the notification.
+  // Only the focused VS Code window should claim. Otherwise leave the
+  // signal for hook.js to fire its OS banner fallback.
   if (!vscode.window.state.focused) {
     log.appendLine('Window not focused — not claiming, leaving for hook.js fallback');
     return;
   }
 
-  // Window IS focused — claim the signal (suppresses hook.js OS banner)
-  try { fs.writeFileSync(getClaimedPath(workspaceRoot), ''); } catch (_) {}
-  try { fs.unlinkSync(signalPath); } catch (err) {
-    // Another window already claimed this signal
-    log.appendLine('Signal already consumed by another window');
+  // Atomically claim. Whoever creates the handled-marker first wins.
+  // If hook.js beat us to it, skip silently.
+  if (!claimHandled(getClaimedPath(workspaceRoot))) {
+    log.appendLine('Signal already claimed by hook.js — skipping');
+    // Treat the signal as fired so the ignored state holds.
+    markSignalFired(signalPath);
     return;
   }
 
-  // If muted, claim to suppress OS banner but don't notify
+  // We own the notification. Delete the signal file now; any stragglers
+  // will exit silently because the claim marker is already set.
+  try { fs.unlinkSync(signalPath); } catch (_) {}
+
   if (config.muted) {
     log.appendLine('Muted — claimed signal, no notification');
     return;
   }
 
   if (eventSetting === 'Nothing') {
-    log.appendLine(`Event "${signal.event}" is disabled — claimed, no notification`);
+    log.appendLine(`Event "${signal.event}" disabled — claimed, no notification`);
     return;
   }
 
   const wantSound = eventSetting === 'Sound + Notification' || eventSetting === 'Sound only';
   const wantToast = eventSetting === 'Sound + Notification' || eventSetting === 'Notification only';
 
-  // Case A: focused + correct terminal → sound only (configurable)
+  // Case A: focused + correct terminal → sound only (configurable).
   const activeTerminal = vscode.window.activeTerminal;
   if (activeTerminal) {
     try {
@@ -187,10 +207,8 @@ async function handleSignal(signalPath, workspaceRoot, log) {
     } catch (_) {}
   }
 
-  // Case B: focused + wrong terminal → play sound + show "Focus Terminal" toast
-  if (wantSound) {
-    playEventSound(signal.event, config);
-  }
+  // Case B: focused + wrong terminal → sound + "Focus Terminal" toast.
+  if (wantSound) playEventSound(signal.event, config);
 
   if (wantToast) {
     const action = await vscode.window.showInformationMessage(
@@ -207,26 +225,77 @@ async function handleSignal(signalPath, workspaceRoot, log) {
   }
 }
 
+/**
+ * Handle the case where the user clicked an OS banner. hook.js already
+ * fired the notification and terminal-notifier dropped the clicked marker.
+ * Focus the matching terminal and clean up — no toast (user's intent is
+ * already clear).
+ */
+async function handleClickedSignal(workspaceRoot, log) {
+  const clickedPath = getClickedPath(workspaceRoot);
+  const signalPath = getSignalPath(workspaceRoot);
+
+  let signal = null;
+  try {
+    const content = fs.readFileSync(signalPath, 'utf8');
+    signal = parseSignal(content);
+  } catch (_) {}
+
+  // Cleanup regardless
+  try { fs.unlinkSync(clickedPath); } catch (_) {}
+  try { fs.unlinkSync(signalPath); } catch (_) {}
+  try { fs.unlinkSync(getClaimedPath(workspaceRoot)); } catch (_) {}
+
+  if (signal && signal.pids.length > 0) {
+    log.appendLine(`Click-to-focus — project=${signal.project}, pids=[${signal.pids.join(',')}]`);
+    await focusMatchingTerminal(signal.pids, log);
+  }
+}
+
+function markSignalFired(signalPath) {
+  try {
+    const content = fs.readFileSync(signalPath, 'utf8');
+    const data = JSON.parse(content);
+    if (data.state !== 'fired') {
+      data.state = 'fired';
+      fs.writeFileSync(signalPath, JSON.stringify(data, null, 2));
+    }
+  } catch (_) {}
+}
+
 function playEventSound(event, config) {
   const soundPath = config.sounds && config.sounds[event];
   const volume = (config.sounds && config.sounds.volume != null) ? config.sounds.volume : 50;
   if (soundPath) {
     playSoundFile(soundPath, volume);
   } else {
-    // Fallback to bundled sound
     const soundName = event === 'completed' ? 'task-complete' : 'notification';
     playSound(soundName, volume / 100);
   }
 }
 
-function sweepStaleClaims(workspaceRoot) {
-  const claimPath = getClaimedPath(workspaceRoot);
+function sweepStaleFile(filePath, staleMs) {
   try {
-    if (fs.existsSync(claimPath)) {
-      const stat = fs.statSync(claimPath);
-      if (Date.now() - stat.mtimeMs > CLAIM_STALE_MS) {
-        fs.unlinkSync(claimPath);
+    if (fs.existsSync(filePath)) {
+      const stat = fs.statSync(filePath);
+      if (Date.now() - stat.mtimeMs > staleMs) {
+        fs.unlinkSync(filePath);
       }
+    }
+  } catch (_) {}
+}
+
+function sweepFiredSignal(workspaceRoot) {
+  const signalPath = getSignalPath(workspaceRoot);
+  try {
+    if (!fs.existsSync(signalPath)) return;
+    const stat = fs.statSync(signalPath);
+    if (Date.now() - stat.mtimeMs < SWEEP_FIRED_MS) return;
+    // Only delete if the file is in fired state (or un-parseable).
+    const content = fs.readFileSync(signalPath, 'utf8');
+    const signal = parseSignal(content);
+    if (!signal || signal.state === 'fired') {
+      fs.unlinkSync(signalPath);
     }
   } catch (_) {}
 }
@@ -235,16 +304,36 @@ function checkAllSignalFiles(log) {
   if (!vscode.workspace.workspaceFolders) return;
 
   for (const folder of vscode.workspace.workspaceFolders) {
-    const signalPath = getSignalPath(folder.uri.fsPath);
+    const workspaceRoot = folder.uri.fsPath;
+    const clickedPath = getClickedPath(workspaceRoot);
+    if (fs.existsSync(clickedPath)) {
+      handleClickedSignal(workspaceRoot, log);
+      return;
+    }
+    const signalPath = getSignalPath(workspaceRoot);
     if (fs.existsSync(signalPath)) {
-      log.appendLine(`Signal found on window focus: ${folder.name}`);
-      handleSignal(signalPath, folder.uri.fsPath, log);
+      handleSignal(signalPath, workspaceRoot, log);
       return;
     }
   }
 }
 
 // --- Terminal focusing ---
+
+/**
+ * Format a terminal for the output channel. Includes the index in
+ * vscode.window.terminals so two tabs with the same display name can be
+ * told apart. Resolves the shell PID asynchronously; logs `pid=?` if
+ * the API throws (disposed terminal, platform quirk).
+ */
+async function describeTerminal(terminal, index) {
+  let pid = '?';
+  try {
+    const resolved = await terminal.processId;
+    if (resolved) pid = String(resolved);
+  } catch (_) {}
+  return `[${index}]"${terminal.name}"(pid=${pid})`;
+}
 
 async function focusMatchingTerminal(pids, log) {
   const terminals = vscode.window.terminals;
@@ -414,7 +503,7 @@ async function cmdSetupGitignore(log) {
 }
 
 async function cmdTestNotification(context, log) {
-  const hookPath = path.join(context.extensionPath, 'hook.js');
+  const hookPath = path.join(context.extensionPath, 'dist', 'hook.js');
   const { spawn } = require('child_process');
   const child = spawn('node', [hookPath], {
     env: { ...process.env, CLAUDE_PROJECT_DIR: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir() },
@@ -429,17 +518,26 @@ async function cmdTestNotification(context, log) {
 
 // --- macOS terminal-notifier setup ---
 
+function detectTerminalNotifier() {
+  if (_terminalNotifierCached !== null) return _terminalNotifierCached;
+  try {
+    const stdout = require('child_process').execSync('command -v terminal-notifier', {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    _terminalNotifierCached = stdout || null;
+  } catch (_) {
+    _terminalNotifierCached = null;
+  }
+  return _terminalNotifierCached;
+}
+
 async function promptMacNotifierSetup(context, log) {
   if (process.platform !== 'darwin') return;
 
+  if (detectTerminalNotifier()) return; // already installed — nothing to prompt
+
   const prompted = context.globalState.get('macNotifierPromptAnswered', false);
   if (prompted) return;
-
-  // Check if terminal-notifier is already installed
-  try {
-    require('child_process').execSync('command -v terminal-notifier', { stdio: 'ignore' });
-    return; // already installed
-  } catch (_) {}
 
   const choice = await vscode.window.showInformationMessage(
     'Claude Notifications: Install terminal-notifier for click-to-open OS banners? Recommended for best experience. Using osascript fallback otherwise.',
@@ -448,10 +546,7 @@ async function promptMacNotifierSetup(context, log) {
 
   if (choice === 'Install (Recommended)') {
     await installTerminalNotifier(context, log);
-  } else if (choice === "Don't Ask Again") {
-    await context.globalState.update('macNotifierPromptAnswered', true);
-  } else {
-    // "Keep osascript" — mark as answered but reset on next major version
+  } else if (choice === "Don't Ask Again" || choice === 'Keep osascript') {
     await context.globalState.update('macNotifierPromptAnswered', true);
   }
 }
@@ -462,21 +557,44 @@ async function cmdSetupMacNotifier(context, log) {
     return;
   }
 
-  // Check if already installed
-  try {
-    require('child_process').execSync('command -v terminal-notifier', { stdio: 'ignore' });
+  _terminalNotifierCached = null; // force re-detect
+  const tnPath = detectTerminalNotifier();
+
+  if (tnPath) {
     const choice = await vscode.window.showInformationMessage(
-      'terminal-notifier is already installed.',
-      'Reinstall', 'OK'
+      `terminal-notifier is already installed at: ${tnPath}`,
+      'Open Notification Settings',
+      'Test Banner',
+      'Reinstall',
+      'Cancel'
     );
-    if (choice !== 'Reinstall') return;
-  } catch (_) {}
+    if (choice === 'Open Notification Settings') {
+      openMacNotificationSettings();
+      vscode.window.showInformationMessage(
+        'Tip: For alerts that stay on screen until dismissed, set terminal-notifier to "Alerts" (instead of "Banners"). If you see duplicate entries, keep the one labeled with "Badges, Sounds, Alerts" and leave the other off — they come from past installs macOS still remembers.'
+      );
+    } else if (choice === 'Test Banner') {
+      await cmdTestNotification(context, log);
+    } else if (choice === 'Reinstall') {
+      await installTerminalNotifier(context, log);
+    }
+    return;
+  }
 
   await installTerminalNotifier(context, log);
 }
 
+function openMacNotificationSettings() {
+  try {
+    require('child_process').spawn(
+      'open',
+      ['x-apple.systempreferences:com.apple.preference.notifications'],
+      { detached: true, stdio: 'ignore' }
+    ).unref();
+  } catch (_) {}
+}
+
 async function installTerminalNotifier(context, log) {
-  // Check for Homebrew
   try {
     require('child_process').execSync('command -v brew', { stdio: 'ignore' });
   } catch (_) {
@@ -486,12 +604,38 @@ async function installTerminalNotifier(context, log) {
     return;
   }
 
-  // Run brew install in a terminal
   const terminal = vscode.window.createTerminal('Claude Notifications Setup');
   terminal.show();
   terminal.sendText('brew install terminal-notifier && echo "\\n✅ terminal-notifier installed! You can close this terminal."');
   await context.globalState.update('macNotifierPromptAnswered', true);
+  _terminalNotifierCached = null; // invalidate cache for next call
   log.appendLine('terminal-notifier install started via Homebrew');
+}
+
+// --- Legacy extension detection ---
+
+function warnIfLegacyExtensionActive(context, log) {
+  const legacy = vscode.extensions.getExtension(LEGACY_EXTENSION_ID);
+  if (!legacy) return;
+
+  log.appendLine(`LEGACY EXTENSION DETECTED: ${LEGACY_EXTENSION_ID} v${legacy.packageJSON.version} is installed and may be causing duplicate notifications`);
+
+  const warned = context.globalState.get('legacyExtensionWarned', false);
+  if (warned) return;
+
+  // Defer to not overwhelm startup
+  setTimeout(async () => {
+    const choice = await vscode.window.showWarningMessage(
+      `Claude Notifications: The older extension "${legacy.packageJSON.displayName || LEGACY_EXTENSION_ID}" is still installed and competing for notifications. Uninstall it to prevent duplicates.`,
+      'Open Extensions',
+      "Don't Show Again"
+    );
+    if (choice === 'Open Extensions') {
+      vscode.commands.executeCommand('workbench.extensions.search', `@installed ${LEGACY_EXTENSION_ID}`);
+    } else if (choice === "Don't Show Again") {
+      await context.globalState.update('legacyExtensionWarned', true);
+    }
+  }, 3000);
 }
 
 // --- Auto-fix stale hook paths ---
@@ -511,6 +655,11 @@ async function autoFixHookPaths(context, log) {
 }
 
 // --- First-run checks ---
+//
+// Semantics of `autoSetupHooks`:
+//   true  (default) — install/upgrade silently; show a confirmation toast
+//                     so the user knows what happened.
+//   false           — prompt before any modification of ~/.claude/settings.json.
 
 async function runFirstRunChecks(context, log, statusBarItem) {
   const { status } = checkHookStatus(context.extensionPath);
@@ -518,10 +667,24 @@ async function runFirstRunChecks(context, log, statusBarItem) {
 
   if (status === 'installed' || status === 'stale-path') return;
 
+  const config = vscode.workspace.getConfiguration('claudeNotifications');
+  const autoSetup = config.get('autoSetupHooks', true);
+
   if (status === 'not-installed' || status === 'no-file') {
+    if (!autoSetup) {
+      const choice = await vscode.window.showInformationMessage(
+        'Claude Notifications: install the Claude Code hooks now? (Required for notifications to fire.)',
+        'Install', 'Later', 'Always Auto-Install'
+      );
+      if (choice === 'Always Auto-Install') {
+        await config.update('autoSetupHooks', true, vscode.ConfigurationTarget.Global);
+      } else if (choice !== 'Install') {
+        return;
+      }
+    }
     const result = installHooks(context.extensionPath, {});
     if (result.success) {
-      log.appendLine('Hooks auto-installed on first run');
+      log.appendLine('Hooks installed on first run');
       vscode.window.showInformationMessage(
         'Claude Notifications: Hooks installed. You\'ll now get notified when Claude needs attention.'
       );
@@ -530,23 +693,37 @@ async function runFirstRunChecks(context, log, statusBarItem) {
       updateStatusBar(statusBarItem, context.extensionPath);
       syncSettingsToConfig(context.extensionPath, log);
     } else {
-      log.appendLine(`Auto-install failed: ${result.message}`);
+      log.appendLine(`Install failed: ${result.message}`);
     }
     return;
   }
 
   if (status === 'legacy') {
-    const config = vscode.workspace.getConfiguration('claudeNotifications');
-    if (!config.get('autoSetupHooks', true)) return;
+    if (autoSetup) {
+      // Auto-upgrade silently with a confirmation toast.
+      const result = installHooks(context.extensionPath, { replaceLegacy: true });
+      if (result.success) {
+        log.appendLine('Legacy shell-script hooks auto-upgraded to Node.js hooks');
+        vscode.window.showInformationMessage(
+          'Claude Notifications: upgraded legacy shell-script hooks to the new Node.js hooks.'
+        );
+        updateStatusBar(statusBarItem, context.extensionPath);
+        syncSettingsToConfig(context.extensionPath, log);
+      } else {
+        log.appendLine(`Legacy upgrade failed: ${result.message}`);
+      }
+      return;
+    }
 
     const choice = await vscode.window.showInformationMessage(
-      'Claude Notifications: Legacy shell-script hooks detected. Upgrade to Node.js hooks?',
-      'Upgrade', 'Later', "Don't Ask Again"
+      'Claude Notifications: legacy shell-script hooks detected. Upgrade to the new Node.js hooks?',
+      'Upgrade', 'Later', 'Always Auto-Upgrade'
     );
-    if (choice === 'Upgrade') {
+    if (choice === 'Always Auto-Upgrade') {
+      await config.update('autoSetupHooks', true, vscode.ConfigurationTarget.Global);
       await cmdSetupHooks(context, log);
-    } else if (choice === "Don't Ask Again") {
-      await config.update('autoSetupHooks', false, vscode.ConfigurationTarget.Global);
+    } else if (choice === 'Upgrade') {
+      await cmdSetupHooks(context, log);
     }
   }
 }
@@ -557,23 +734,28 @@ function syncSettingsToConfig(extensionPath, log) {
   const cfg = vscode.workspace.getConfiguration('claudeNotifications');
   const config = readConfig();
 
+  // Read from the per-event keys (claudeNotifications.waiting.*,
+  // claudeNotifications.completed.*) and the universal `volume` key, then
+  // write the same { sounds, events } shape the hook reads from the shared
+  // config file. Keeping that shape stable means hook.js doesn't need to
+  // know about the VS Code key rename.
   config.sounds = {
     waiting: resolveSoundPath(
-      cfg.get('sounds.waiting', 'bundled:notification'),
-      cfg.get('sounds.waitingPath', ''),
+      cfg.get('waiting.sound', 'bundled:notification'),
+      cfg.get('waiting.customSoundPath', ''),
       extensionPath
     ),
     completed: resolveSoundPath(
-      cfg.get('sounds.completed', 'bundled:task-complete'),
-      cfg.get('sounds.completedPath', ''),
+      cfg.get('completed.sound', 'bundled:task-complete'),
+      cfg.get('completed.customSoundPath', ''),
       extensionPath
     ),
-    volume: cfg.get('sounds.volume', 50)
+    volume: cfg.get('volume', 50)
   };
 
   config.events = {
-    waiting: cfg.get('events.waiting', 'Sound + Notification'),
-    completed: cfg.get('events.completed', 'Sound + Notification')
+    waiting: cfg.get('waiting.action', 'Sound + Notification'),
+    completed: cfg.get('completed.action', 'Sound + Notification')
   };
 
   writeConfig(config);
@@ -581,76 +763,279 @@ function syncSettingsToConfig(extensionPath, log) {
 }
 
 // --- Choose Sound / Preview Sound commands ---
+//
+// Both commands use createQuickPick (rather than showQuickPick) so each item
+// can carry a speaker-icon button. Clicking the speaker previews that row's
+// sound at the user's configured volume; arrow-keying does *not* play anything
+// — playback is strictly opt-in per click.
+//
+// The sound list is platform-detected at invocation time via discoverSystemSounds,
+// which reads /System/Library/Sounds on macOS, C:\Windows\Media on Windows, and
+// /usr/share/sounds/freedesktop on Linux, so each OS sees only sounds that
+// actually exist on the machine.
 
-async function cmdChooseSound(context, log) {
-  const events = [
-    { label: 'Waiting (needs your response)', setting: 'sounds.waiting', pathSetting: 'sounds.waitingPath' },
-    { label: 'Completed (task finished)', setting: 'sounds.completed', pathSetting: 'sounds.completedPath' }
-  ];
+function platformLabel() {
+  return { darwin: 'macOS', win32: 'Windows', linux: 'Linux' }[process.platform] || 'System';
+}
 
-  const eventPick = await vscode.window.showQuickPick(
-    events.map(e => e.label),
-    { placeHolder: 'Choose which event to configure' }
-  );
-  if (!eventPick) return;
-  const event = events.find(e => e.label === eventPick);
+/**
+ * Build the QuickPick item list. `previewable` entries get a speaker button
+ * so the user can click to hear them. The button object is frozen and shared
+ * across items so the onDidTriggerItemButton handler can identify it by
+ * reference — safer than tooltip-string comparison.
+ */
+function buildSoundItems({ includeCustom = true, includeNone = true, currentValue = null, previewButton } = {}) {
+  const items = [];
+  const mark = (val, label) => (val === currentValue ? `$(check) ${label}` : `       ${label}`);
+  const withPreview = (item) => (previewButton ? { ...item, buttons: [previewButton] } : item);
 
-  const items = [
-    { label: '$(package) Bundled: Glass (task-complete)', value: 'bundled:task-complete' },
-    { label: '$(package) Bundled: Funk (notification)', value: 'bundled:notification' }
-  ];
-
-  const systemSounds = discoverSystemSounds();
-  for (const s of systemSounds) {
-    items.push({ label: `$(device-desktop) System: ${s.label}`, value: `system:${s.label}` });
+  if (includeNone) {
+    items.push({
+      label: mark('none', '$(mute) Silent — no sound'),
+      description: 'none',
+      detail: 'Banner/toast still shows, no audio',
+      value: 'none',
+      previewable: false
+    });
   }
 
   items.push(
-    { label: '$(file) Custom file...', value: 'custom' },
-    { label: '$(mute) None', value: 'none' }
+    withPreview({
+      label: mark('bundled:notification', '$(package) Bundled · Notification'),
+      description: 'bundled:notification',
+      detail: 'Cross-platform chime designed for "waiting" events',
+      value: 'bundled:notification',
+      previewable: true
+    }),
+    withPreview({
+      label: mark('bundled:task-complete', '$(package) Bundled · Task Complete'),
+      description: 'bundled:task-complete',
+      detail: 'Cross-platform chime designed for "completed" events',
+      value: 'bundled:task-complete',
+      previewable: true
+    })
   );
 
-  const soundPick = await vscode.window.showQuickPick(items, {
-    placeHolder: `Sound for "${eventPick}"`
-  });
-  if (!soundPick) return;
-
-  const cfg = vscode.workspace.getConfiguration('claudeNotifications');
-
-  if (soundPick.value === 'custom') {
-    const files = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      filters: { 'Audio': ['wav', 'mp3', 'aiff', 'ogg'] }
+  const os = platformLabel();
+  const systemSounds = discoverSystemSounds();
+  if (systemSounds.length === 0) {
+    items.push({
+      label: '$(warning) No system sounds detected on this OS',
+      kind: vscode.QuickPickItemKind.Separator
     });
-    if (!files || files.length === 0) return;
-    await cfg.update(event.pathSetting, files[0].fsPath, vscode.ConfigurationTarget.Global);
+  } else {
+    items.push({
+      label: `$(device-desktop) ${os} system sounds (${systemSounds.length})`,
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    for (const s of systemSounds) {
+      const value = `system:${s.label}`;
+      items.push(withPreview({
+        label: mark(value, `$(device-desktop) ${os} · ${s.label}`),
+        description: value,
+        detail: s.path,
+        value,
+        previewable: true
+      }));
+    }
   }
 
-  await cfg.update(event.setting, soundPick.value, vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage(`Sound for "${eventPick}" set to: ${soundPick.value}`);
+  if (includeCustom) {
+    items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
+    items.push({
+      label: mark('custom', '$(file) Custom file…'),
+      description: 'custom',
+      detail: 'Pick a .wav / .mp3 / .aiff / .ogg file from disk',
+      value: 'custom',
+      previewable: false
+    });
+  }
+
+  return items;
 }
 
-async function cmdPreviewSound(context, log) {
-  const items = [
-    { label: 'Bundled: Glass (task-complete)', value: 'bundled:task-complete' },
-    { label: 'Bundled: Funk (notification)', value: 'bundled:notification' }
-  ];
+/**
+ * Play the sound for a previewable item. Fire-and-forget; overlapping plays
+ * are fine — each is a short (~1-2s) afplay/paplay process.
+ */
+function playPreview(item, extensionPath, volume) {
+  if (!item || !item.previewable || !item.value) return;
+  if (item.value === 'custom' || item.value === 'none') return;
+  const filePath = resolveSoundPath(item.value, '', extensionPath);
+  if (filePath) playSoundFile(filePath, volume);
+}
 
-  const systemSounds = discoverSystemSounds();
-  for (const s of systemSounds) {
-    items.push({ label: `System: ${s.label}`, value: `system:${s.label}` });
+/**
+ * Construct the speaker button. Created per-picker so the reference identity
+ * is stable for that picker's lifetime and can't leak across sessions.
+ */
+function createPreviewButton() {
+  return {
+    iconPath: new vscode.ThemeIcon('unmute'),
+    tooltip: 'Preview this sound'
+  };
+}
+
+// Per-event metadata. Settings keys live under claudeNotifications.waiting.*
+// and claudeNotifications.completed.*; the `icon` / `defaultSoundLabel` pairs
+// are used by the Preview picker to render a compact two-row display.
+const EVENT_META = {
+  waiting: {
+    label: 'Waiting',
+    detail: 'Fires when Claude needs your response',
+    setting: 'waiting.sound',
+    pathSetting: 'waiting.customSoundPath',
+    icon: '$(bell)'
+  },
+  completed: {
+    label: 'Completed',
+    detail: 'Fires when Claude finishes a task',
+    setting: 'completed.sound',
+    pathSetting: 'completed.customSoundPath',
+    icon: '$(check-all)'
+  }
+};
+
+/**
+ * Human-readable name for a sound-setting value, used by Preview Sound to
+ * display "Currently: Bundled · Notification" / "macOS · Glass" / etc.
+ */
+function soundDisplayName(value, customPath) {
+  if (!value || value === 'none') return 'Silent';
+  if (value === 'bundled:notification') return 'Bundled · Notification';
+  if (value === 'bundled:task-complete') return 'Bundled · Task Complete';
+  if (value.startsWith('system:')) {
+    const name = value.slice('system:'.length);
+    return `${platformLabel()} · ${name}`;
+  }
+  if (value === 'custom') {
+    const tail = customPath ? customPath.split('/').pop() : '(no file selected)';
+    return `Custom file · ${tail}`;
+  }
+  return value;
+}
+
+async function cmdChooseSound(context, log, eventArg) {
+  // When invoked from a setting's markdown link, VS Code passes the event
+  // as a string argument ("waiting" / "completed"). When invoked from the
+  // command palette, there's no argument and we need to ask.
+  let eventKey = eventArg;
+  if (eventKey !== 'waiting' && eventKey !== 'completed') {
+    const choice = await vscode.window.showQuickPick(
+      [
+        { label: 'Waiting', description: EVENT_META.waiting.detail, value: 'waiting' },
+        { label: 'Completed', description: EVENT_META.completed.detail, value: 'completed' }
+      ],
+      { placeHolder: 'Configure sound for which event?' }
+    );
+    if (!choice) return;
+    eventKey = choice.value;
   }
 
-  const pick = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select a sound to preview'
+  const meta = EVENT_META[eventKey];
+  const cfg = vscode.workspace.getConfiguration('claudeNotifications');
+  const currentValue = cfg.get(meta.setting);
+  // Volume is captured at picker-open time; it matches the real notification
+  // path (hook.js also reads volume once when it fires).
+  const volume = cfg.get('volume', 50);
+  const previewButton = createPreviewButton();
+
+  const picker = vscode.window.createQuickPick();
+  picker.title = `Sound for "${meta.label}" event`;
+  picker.placeholder = 'Click the $(unmute) speaker to preview. Enter to save, Escape to cancel.';
+  picker.items = buildSoundItems({ currentValue, previewButton });
+  picker.matchOnDescription = true;
+  picker.matchOnDetail = true;
+  picker.ignoreFocusOut = false;
+
+  // Speaker button → preview. Reference-equality check keeps the handler
+  // robust if new buttons are added later.
+  picker.onDidTriggerItemButton(({ item, button }) => {
+    if (button !== previewButton) return;
+    playPreview(item, context.extensionPath, volume);
   });
-  if (!pick) return;
 
-  const filePath = resolveSoundPath(pick.value, '', context.extensionPath);
-  if (filePath) {
-    const vol = vscode.workspace.getConfiguration('claudeNotifications').get('sounds.volume', 50);
-    playSoundFile(filePath, vol);
-  }
+  picker.onDidAccept(async () => {
+    const pick = picker.selectedItems[0];
+    picker.hide();
+    if (!pick || !pick.value) return;
+
+    if (pick.value === 'custom') {
+      const files = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectMany: false,
+        openLabel: 'Use this sound',
+        filters: { 'Audio': ['wav', 'mp3', 'aiff', 'ogg'] }
+      });
+      if (!files || files.length === 0) return;
+      await cfg.update(meta.pathSetting, files[0].fsPath, vscode.ConfigurationTarget.Global);
+    }
+
+    await cfg.update(meta.setting, pick.value, vscode.ConfigurationTarget.Global);
+    log.appendLine(`Sound for "${meta.label}" set to: ${pick.value}`);
+    vscode.window.showInformationMessage(`Claude Notifications: "${meta.label}" sound set to ${pick.value}`);
+  });
+
+  picker.onDidHide(() => picker.dispose());
+  picker.show();
+}
+
+/**
+ * Preview Sound plays the user's currently-configured sounds for each event.
+ * Two rows: Waiting / Completed, each showing the current sound name and a
+ * speaker button. Click the speaker (or highlight + Enter) to hear that
+ * row's sound at the configured volume.
+ */
+async function cmdPreviewSound(context, log) {
+  const cfg = vscode.workspace.getConfiguration('claudeNotifications');
+  const volume = cfg.get('volume', 50);
+  const previewButton = createPreviewButton();
+
+  const makeRow = (eventKey) => {
+    const meta = EVENT_META[eventKey];
+    const value = cfg.get(meta.setting);
+    const customPath = cfg.get(meta.pathSetting, '');
+    const name = soundDisplayName(value, customPath);
+    const filePath = resolveSoundPath(value, customPath, context.extensionPath);
+    return {
+      label: `${meta.icon}  ${meta.label}`,
+      description: `Currently: ${name}`,
+      detail: filePath || '(no audio file — will be silent)',
+      eventKey,
+      filePath,
+      buttons: filePath ? [previewButton] : []
+    };
+  };
+
+  const picker = vscode.window.createQuickPick();
+  picker.title = 'Preview Sound';
+  picker.placeholder = 'Click the $(unmute) speaker (or press Enter) to hear that notification. Escape to close.';
+  picker.items = [makeRow('waiting'), makeRow('completed')];
+  picker.matchOnDescription = false;
+  picker.matchOnDetail = false;
+
+  const playRow = (item) => {
+    if (!item || !item.filePath) {
+      vscode.window.showInformationMessage(
+        `Claude Notifications: "${item && item.label ? item.label.replace(/^\S+\s+/, '') : 'This event'}" has no sound configured.`
+      );
+      return;
+    }
+    playSoundFile(item.filePath, volume);
+  };
+
+  picker.onDidTriggerItemButton(({ item, button }) => {
+    if (button !== previewButton) return;
+    playRow(item);
+  });
+
+  // Enter plays the highlighted row (keyboard-only shortcut); picker stays
+  // open so the user can preview both events without reopening.
+  picker.onDidAccept(() => playRow(picker.selectedItems[0] || picker.activeItems[0]));
+
+  picker.onDidHide(() => picker.dispose());
+  picker.show();
+  log.appendLine('Preview Sound picker opened');
 }
 
 function deactivate() {}
