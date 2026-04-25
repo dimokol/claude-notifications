@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.2.0] - 2026-04-25
+
+### Changed
+- **Stage-ID dedup replaces the 5-second session timer.** Each session now tracks a `stageId` that advances on (a) `UserPromptSubmit`, (b) a different event type than the last notified one, or (c) the previous stage being resolved by user acknowledgment (banner click, Focus Terminal action, or having focus on the matching terminal). Same-event re-fires on an unresolved stage are suppressed at the source — no banner, no sound. Removes the "ghosts long after I already clicked the first one" failure mode the 5s window couldn't catch.
+- **All coordination state moved out of `.vscode/`** into `~/.claude/focus-state/<sha1(workspace).slice(0,12)>/`. The signal, click marker, claim marker, and sessions file no longer touch the workspace and can never appear in a repo's git changes.
+
+### Added
+- New `UserPromptSubmit` hook (`dist/hook-user-prompt.js`) that advances the session's stageId so the next event after a user prompt always fires a fresh notification.
+- `node:test` unit tests for `lib/state-paths.js` and `lib/stage-dedup.js` (`npm test`).
+
+### Removed
+- The "Add signal files to global gitignore?" prompt and the `claudeNotifications.setupGitignore` command — no longer needed now that state lives outside the workspace.
+- `lib/gitignore-setup.js` module.
+
 ## [3.1.4] - 2026-04-23
 
 ### Fixed

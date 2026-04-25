@@ -2,7 +2,7 @@
   "name": "claude-notifications",
   "displayName": "Claude Notifications",
   "description": "All-in-one Claude Code notifications — sound alerts, OS notifications, and terminal focus. One-click setup, zero external dependencies.",
-  "version": "3.1.4",
+  "version": "3.2.0",
   "publisher": "dimokol",
   "license": "MIT",
   "repository": {
@@ -55,7 +55,8 @@
   "main": "./dist/extension.js",
   "scripts": {
     "build": "node esbuild.js",
-    "package": "npm run build && vsce package"
+    "package": "npm run build && vsce package",
+    "test": "node --test test/*.test.js"
   },
   "contributes": {
     "commands": [
