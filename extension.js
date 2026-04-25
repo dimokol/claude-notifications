@@ -11,15 +11,21 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const {
+  SIGNAL_VERSION,
+  STALE_THRESHOLD_MS,
+  CLAIM_STALE_MS,
+  claimHandled,
+  eventPriority,
+  parseSignal
+} = require('./lib/signals');
+const {
   getSignalPath,
   getClickedPath,
   getClaimedPath,
-  claimHandled,
-  parseSignal,
-  CLAIM_STALE_MS
-} = require('./lib/signals');
+  getStateDir
+} = require('./lib/state-paths');
+const { markResolved } = require('./lib/stage-dedup');
 const { checkHookStatus, installHooks, uninstallHooks } = require('./lib/hooks-installer');
-const { checkGitignoreStatus, setupGitignore } = require('./lib/gitignore-setup');
 const { playSound, playSoundFile, resolveSoundPath, discoverSystemSounds } = require('./lib/sounds');
 
 const POLL_MS = 400;
@@ -50,8 +56,7 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeNotifications.setupHooks', () => cmdSetupHooks(context, log)),
     vscode.commands.registerCommand('claudeNotifications.removeHooks', () => cmdRemoveHooks(log)),
-    vscode.commands.registerCommand('claudeNotifications.setupGitignore', () => cmdSetupGitignore(log)),
-    vscode.commands.registerCommand('claudeNotifications.testNotification', () => cmdTestNotification(context, log)),
+vscode.commands.registerCommand('claudeNotifications.testNotification', () => cmdTestNotification(context, log)),
     vscode.commands.registerCommand('claudeNotifications.toggleMute', () => {
       const config = readConfig();
       config.muted = !config.muted;
@@ -201,6 +206,7 @@ async function handleSignal(signalPath, workspaceRoot, log) {
       const activePid = await activeTerminal.processId;
       if (activePid && signal.pids.includes(activePid)) {
         log.appendLine('Already on correct terminal — sound only (if enabled)');
+        markResolved(workspaceRoot, signal.sessionId);
         const soundWhenFocused = vscode.workspace.getConfiguration('claudeNotifications').get('soundWhenFocused', 'sound');
         if (soundWhenFocused === 'sound' && wantSound) {
           playEventSound(signal.event, config);
@@ -224,6 +230,7 @@ async function handleSignal(signalPath, workspaceRoot, log) {
     if (action === 'Focus Terminal') {
       log.appendLine('User clicked Focus Terminal');
       await focusMatchingTerminal(signal.pids, log);
+      markResolved(workspaceRoot, signal.sessionId);
     }
   }
 }
@@ -254,6 +261,7 @@ async function handleClickedSignal(workspaceRoot, log) {
     const sessionTag = signal.sessionId ? signal.sessionId.slice(0, 8) : '?';
     log.appendLine(`Click-to-focus — event=${signal.event}(${rawEvent}), session=${sessionTag}, project=${signal.project}, pids=[${signal.pids.join(',')}]`);
     await focusMatchingTerminal(signal.pids, log);
+    markResolved(workspaceRoot, signal.sessionId);
   }
 }
 
@@ -473,17 +481,6 @@ async function cmdSetupHooks(context, log) {
     updateStatusBar(_statusBarItem, context.extensionPath);
     syncSettingsToConfig(context.extensionPath, log);
 
-    const gitStatus = checkGitignoreStatus();
-    if (!gitStatus.configured) {
-      const gitChoice = await vscode.window.showInformationMessage(
-        'Add signal files to global gitignore?',
-        'Yes', 'No'
-      );
-      if (gitChoice === 'Yes') {
-        const gitResult = setupGitignore();
-        vscode.window.showInformationMessage(gitResult.message);
-      }
-    }
   } else {
     vscode.window.showErrorMessage(result.message);
   }
@@ -505,15 +502,6 @@ async function cmdRemoveHooks(log) {
   }
 }
 
-async function cmdSetupGitignore(log) {
-  const result = setupGitignore();
-  if (result.success) {
-    log.appendLine(result.message);
-    vscode.window.showInformationMessage(result.message);
-  } else {
-    vscode.window.showErrorMessage(result.message);
-  }
-}
 
 async function cmdTestNotification(context, log) {
   const hookPath = path.join(context.extensionPath, 'dist', 'hook.js');
@@ -717,8 +705,6 @@ async function runFirstRunChecks(context, log, statusBarItem) {
       vscode.window.showInformationMessage(
         'Claude Notifications: Hooks installed. You\'ll now get notified when Claude needs attention.'
       );
-      const gitStatus = checkGitignoreStatus();
-      if (!gitStatus.configured) setupGitignore();
       updateStatusBar(statusBarItem, context.extensionPath);
       syncSettingsToConfig(context.extensionPath, log);
     } else {
