@@ -8,24 +8,10 @@ var __commonJS = (cb, mod) => function __require() {
 var require_signals = __commonJS({
   "lib/signals.js"(exports2, module2) {
     var fs2 = require("fs");
-    var path2 = require("path");
-    var SIGNAL_DIR2 = ".vscode";
-    var SIGNAL_FILE2 = ".claude-focus";
-    var CLICKED_FILE2 = ".claude-focus-clicked";
-    var CLAIMED_FILE2 = ".claude-focus-claimed";
     var SIGNAL_VERSION = 2;
     var STALE_THRESHOLD_MS = 3e4;
     var CLAIM_STALE_MS = 5e3;
     var EVENT_PRIORITY = { completed: 1, waiting: 2 };
-    function getSignalPath(workspaceRoot) {
-      return path2.join(workspaceRoot, SIGNAL_DIR2, SIGNAL_FILE2);
-    }
-    function getClickedPath(workspaceRoot) {
-      return path2.join(workspaceRoot, SIGNAL_DIR2, CLICKED_FILE2);
-    }
-    function getClaimedPath(workspaceRoot) {
-      return path2.join(workspaceRoot, SIGNAL_DIR2, CLAIMED_FILE2);
-    }
     function eventPriority2(event) {
       return EVENT_PRIORITY[event] || 0;
     }
@@ -93,20 +79,145 @@ var require_signals = __commonJS({
       };
     }
     module2.exports = {
-      SIGNAL_DIR: SIGNAL_DIR2,
-      SIGNAL_FILE: SIGNAL_FILE2,
-      CLICKED_FILE: CLICKED_FILE2,
-      CLAIMED_FILE: CLAIMED_FILE2,
       SIGNAL_VERSION,
       STALE_THRESHOLD_MS,
       CLAIM_STALE_MS,
-      getSignalPath,
-      getClickedPath,
-      getClaimedPath,
       claimHandled: claimHandled2,
       eventPriority: eventPriority2,
       normalizeEvent,
       parseSignal
+    };
+  }
+});
+
+// lib/state-paths.js
+var require_state_paths = __commonJS({
+  "lib/state-paths.js"(exports2, module2) {
+    var crypto = require("crypto");
+    var os2 = require("os");
+    var path2 = require("path");
+    var STATE_ROOT = path2.join(os2.homedir(), ".claude", "focus-state");
+    function hashWorkspace(workspaceRoot) {
+      return crypto.createHash("sha1").update(String(workspaceRoot)).digest("hex").slice(0, 12);
+    }
+    function getStateDir2(workspaceRoot) {
+      return path2.join(STATE_ROOT, hashWorkspace(workspaceRoot));
+    }
+    function getSignalPath2(workspaceRoot) {
+      return path2.join(getStateDir2(workspaceRoot), "signal");
+    }
+    function getClickedPath2(workspaceRoot) {
+      return path2.join(getStateDir2(workspaceRoot), "clicked");
+    }
+    function getClaimedPath2(workspaceRoot) {
+      return path2.join(getStateDir2(workspaceRoot), "claimed");
+    }
+    function getSessionsPath(workspaceRoot) {
+      return path2.join(getStateDir2(workspaceRoot), "sessions");
+    }
+    module2.exports = {
+      STATE_ROOT,
+      hashWorkspace,
+      getStateDir: getStateDir2,
+      getSignalPath: getSignalPath2,
+      getClickedPath: getClickedPath2,
+      getClaimedPath: getClaimedPath2,
+      getSessionsPath
+    };
+  }
+});
+
+// lib/stage-dedup.js
+var require_stage_dedup = __commonJS({
+  "lib/stage-dedup.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { getStateDir: getStateDir2, getSessionsPath } = require_state_paths();
+    var SESSIONS_PRUNE_MS = 60 * 60 * 1e3;
+    function ensureDir(workspaceRoot) {
+      const dir = getStateDir2(workspaceRoot);
+      fs2.mkdirSync(dir, { recursive: true });
+      return dir;
+    }
+    function readSessions(workspaceRoot) {
+      const p = getSessionsPath(workspaceRoot);
+      try {
+        const data = JSON.parse(fs2.readFileSync(p, "utf8"));
+        return data && typeof data === "object" ? data : {};
+      } catch (_) {
+        return {};
+      }
+    }
+    function writeSessions(workspaceRoot, map) {
+      ensureDir(workspaceRoot);
+      const now = Date.now();
+      for (const key of Object.keys(map)) {
+        const u = map[key] && map[key].updatedAt;
+        if (typeof u === "number" && now - u > SESSIONS_PRUNE_MS) delete map[key];
+      }
+      try {
+        fs2.writeFileSync(getSessionsPath(workspaceRoot), JSON.stringify(map));
+      } catch (_) {
+      }
+    }
+    function shouldNotify(workspaceRoot, sessionId, currentEvent) {
+      if (!sessionId) return { notify: true, stageId: null };
+      const map = readSessions(workspaceRoot);
+      const now = Date.now();
+      let entry = map[sessionId];
+      if (!entry) {
+        entry = { stageId: 1, lastEvent: currentEvent, resolved: false, lastNotifiedAt: now, updatedAt: now };
+        map[sessionId] = entry;
+        writeSessions(workspaceRoot, map);
+        return { notify: true, stageId: 1 };
+      }
+      if (entry.lastEvent === null) {
+        entry.lastEvent = currentEvent;
+        entry.resolved = false;
+        entry.lastNotifiedAt = now;
+        entry.updatedAt = now;
+        writeSessions(workspaceRoot, map);
+        return { notify: true, stageId: entry.stageId };
+      }
+      const shouldAdvance = entry.resolved === true || entry.lastEvent !== currentEvent;
+      if (shouldAdvance) {
+        entry.stageId = (entry.stageId || 0) + 1;
+        entry.lastEvent = currentEvent;
+        entry.resolved = false;
+        entry.lastNotifiedAt = now;
+        entry.updatedAt = now;
+        writeSessions(workspaceRoot, map);
+        return { notify: true, stageId: entry.stageId };
+      }
+      return { notify: false, stageId: entry.stageId };
+    }
+    function advanceOnPrompt(workspaceRoot, sessionId) {
+      if (!sessionId) return;
+      const map = readSessions(workspaceRoot);
+      const now = Date.now();
+      const entry = map[sessionId] || { stageId: 0, lastEvent: null, resolved: false, lastNotifiedAt: 0, updatedAt: now };
+      entry.stageId = (entry.stageId || 0) + 1;
+      entry.lastEvent = null;
+      entry.resolved = false;
+      entry.updatedAt = now;
+      map[sessionId] = entry;
+      writeSessions(workspaceRoot, map);
+    }
+    function markResolved(workspaceRoot, sessionId) {
+      if (!sessionId) return;
+      const map = readSessions(workspaceRoot);
+      const entry = map[sessionId];
+      if (!entry) return;
+      entry.resolved = true;
+      entry.updatedAt = Date.now();
+      writeSessions(workspaceRoot, map);
+    }
+    module2.exports = {
+      SESSIONS_PRUNE_MS,
+      shouldNotify,
+      advanceOnPrompt,
+      markResolved,
+      _readSessions: readSessions
     };
   }
 });
@@ -117,19 +228,16 @@ var path = require("path");
 var { execSync, execFile, spawn } = require("child_process");
 var os = require("os");
 var { setTimeout: sleep } = require("node:timers/promises");
+var { claimHandled, eventPriority } = require_signals();
 var {
-  SIGNAL_DIR,
-  SIGNAL_FILE,
-  CLICKED_FILE,
-  CLAIMED_FILE,
-  claimHandled,
-  eventPriority
-} = require_signals();
+  getStateDir,
+  getSignalPath,
+  getClickedPath,
+  getClaimedPath
+} = require_state_paths();
+var { shouldNotify: checkShouldNotify } = require_stage_dedup();
 var CONFIG_FILE = "claude-notifications-config.json";
 var DEFAULT_HANDSHAKE_MS = 1200;
-var SESSIONS_FILE = ".claude-focus-sessions";
-var SESSION_DEDUP_MS = 5 * 1e3;
-var SESSIONS_PRUNE_MS = 60 * 60 * 1e3;
 function shEsc(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
@@ -169,46 +277,19 @@ function shEsc(s) {
   let searchDir = projectDir;
   while (searchDir !== path.dirname(searchDir)) {
     if (searchDir === homeDir) break;
-    if (fs.existsSync(path.join(searchDir, SIGNAL_DIR))) {
+    if (fs.existsSync(path.join(searchDir, ".vscode"))) {
       workspaceRoot = searchDir;
     }
     searchDir = path.dirname(searchDir);
   }
-  const signalDirPath = path.join(workspaceRoot, SIGNAL_DIR);
-  if (!fs.existsSync(signalDirPath)) {
-    fs.mkdirSync(signalDirPath, { recursive: true });
-  }
-  const signalPath = path.join(signalDirPath, SIGNAL_FILE);
-  const claimPath = path.join(signalDirPath, CLAIMED_FILE);
-  const clickedPath = path.join(signalDirPath, CLICKED_FILE);
-  const sessionsPath = path.join(signalDirPath, SESSIONS_FILE);
-  function readSessions() {
-    try {
-      const data = JSON.parse(fs.readFileSync(sessionsPath, "utf8"));
-      return data && typeof data === "object" ? data : {};
-    } catch (_) {
-      return {};
-    }
-  }
-  function writeSessions(map) {
-    const now = Date.now();
-    for (const key of Object.keys(map)) {
-      if (now - map[key] > SESSIONS_PRUNE_MS) delete map[key];
-    }
-    try {
-      fs.writeFileSync(sessionsPath, JSON.stringify(map));
-    } catch (_) {
-    }
-  }
-  if (sessionId) {
-    const sessions = readSessions();
-    const lastNotified = sessions[sessionId];
-    const now = Date.now();
-    if (lastNotified && now - lastNotified < SESSION_DEDUP_MS) {
-      process.exit(0);
-    }
-    sessions[sessionId] = now;
-    writeSessions(sessions);
+  const stateDir = getStateDir(workspaceRoot);
+  fs.mkdirSync(stateDir, { recursive: true });
+  const signalPath = getSignalPath(workspaceRoot);
+  const claimPath = getClaimedPath(workspaceRoot);
+  const clickedPath = getClickedPath(workspaceRoot);
+  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent);
+  if (!dedup.notify) {
+    process.exit(0);
   }
   function getPidChain() {
     const pids2 = [];

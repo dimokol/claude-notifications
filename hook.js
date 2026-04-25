@@ -20,20 +20,17 @@ const path = require('path');
 const { execSync, execFile, spawn } = require('child_process');
 const os = require('os');
 const { setTimeout: sleep } = require('node:timers/promises');
+const { claimHandled, eventPriority } = require('./lib/signals');
 const {
-  SIGNAL_DIR,
-  SIGNAL_FILE,
-  CLICKED_FILE,
-  CLAIMED_FILE,
-  claimHandled,
-  eventPriority
-} = require('./lib/signals');
+  getStateDir,
+  getSignalPath,
+  getClickedPath,
+  getClaimedPath
+} = require('./lib/state-paths');
+const { shouldNotify: checkShouldNotify } = require('./lib/stage-dedup');
 
 const CONFIG_FILE = 'claude-notifications-config.json';
 const DEFAULT_HANDSHAKE_MS = 1200;
-const SESSIONS_FILE = '.claude-focus-sessions';
-const SESSION_DEDUP_MS = 5 * 1000;       // 5 s: suppress any repeat hook for a session that just notified
-const SESSIONS_PRUNE_MS = 60 * 60 * 1000; // drop session entries older than 1h
 
 // Shell-escape a single argument (POSIX single-quote style).
 function shEsc(s) {
@@ -80,65 +77,34 @@ function shEsc(s) {
   const isMuted = config.muted === true;
 
   // --- 3. Find workspace root ---
-
+  // Walk up from projectDir looking for a .vscode/ folder as the marker of
+  // a VS Code workspace. Stop at $HOME. If none found, use projectDir.
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   let workspaceRoot = projectDir;
   let searchDir = projectDir;
-
   while (searchDir !== path.dirname(searchDir)) {
     if (searchDir === homeDir) break;
-    if (fs.existsSync(path.join(searchDir, SIGNAL_DIR))) {
+    if (fs.existsSync(path.join(searchDir, '.vscode'))) {
       workspaceRoot = searchDir;
     }
     searchDir = path.dirname(searchDir);
   }
 
-  const signalDirPath = path.join(workspaceRoot, SIGNAL_DIR);
-  if (!fs.existsSync(signalDirPath)) {
-    fs.mkdirSync(signalDirPath, { recursive: true });
-  }
+  // --- State directory (user-level, hashed per workspace) ---
+  const stateDir = getStateDir(workspaceRoot);
+  fs.mkdirSync(stateDir, { recursive: true });
+  const signalPath = getSignalPath(workspaceRoot);
+  const claimPath = getClaimedPath(workspaceRoot);
+  const clickedPath = getClickedPath(workspaceRoot);
 
-  const signalPath = path.join(signalDirPath, SIGNAL_FILE);
-  const claimPath = path.join(signalDirPath, CLAIMED_FILE);
-  const clickedPath = path.join(signalDirPath, CLICKED_FILE);
-  const sessionsPath = path.join(signalDirPath, SESSIONS_FILE);
-
-  // --- Session coalescing ---
-  // Claude 2.1.x fires duplicate hooks per turn:
-  //   (a) Stop + Notification("Claude is waiting for your input")
-  //   (b) PermissionRequest + Notification("Claude needs your permission...")
-  //   (c) Multiple Stop events in rapid succession for the same session
-  // All three patterns produce their duplicates within ~1–2 s. We suppress any
-  // hook for a session that already triggered a notification in the last 5 s.
-  // The window is short enough that a genuinely new turn (user response →
-  // Claude work → next event) — which realistically takes longer — still fires.
-  function readSessions() {
-    try {
-      const data = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'));
-      return (data && typeof data === 'object') ? data : {};
-    } catch (_) {
-      return {};
-    }
-  }
-  function writeSessions(map) {
-    const now = Date.now();
-    for (const key of Object.keys(map)) {
-      if (now - map[key] > SESSIONS_PRUNE_MS) delete map[key];
-    }
-    try {
-      fs.writeFileSync(sessionsPath, JSON.stringify(map));
-    } catch (_) {}
-  }
-
-  if (sessionId) {
-    const sessions = readSessions();
-    const lastNotified = sessions[sessionId];
-    const now = Date.now();
-    if (lastNotified && now - lastNotified < SESSION_DEDUP_MS) {
-      process.exit(0);
-    }
-    sessions[sessionId] = now;
-    writeSessions(sessions);
+  // --- Stage-ID dedup ---
+  // Suppress re-fires of Stop/Notification for an already-notified,
+  // unresolved stage. Stage advances on event-type change, on previous
+  // stage being resolved (user ack), or on UserPromptSubmit (handled by
+  // hook-user-prompt.js). See lib/stage-dedup.js for the full state machine.
+  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent);
+  if (!dedup.notify) {
+    process.exit(0);
   }
 
   // --- 4. Build PID ancestor chain ---
