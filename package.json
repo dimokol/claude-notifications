@@ -68,10 +68,6 @@
         "title": "Claude Notifications: Remove Claude Code Hooks"
       },
       {
-        "command": "claudeNotifications.setupGitignore",
-        "title": "Claude Notifications: Add Signal Files to Global Gitignore"
-      },
-      {
         "command": "claudeNotifications.testNotification",
         "title": "Claude Notifications: Test Notification"
       },
