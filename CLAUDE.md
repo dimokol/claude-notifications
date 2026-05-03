@@ -2,7 +2,7 @@
 
 > Project: **Claude Notifications** — VS Code extension (publisher `dimokol`, id `dimokol.claude-notifications`).
 > Repo name on disk: `claude-terminal-focus` (legacy directory name; do not rename, the publisher id is what users see).
-> Current version: **3.2.0**.
+> Current version: **3.3.0**.
 > User: solo maintainer, dev machine is macOS, target users are Claude Code users on macOS / Windows / Linux.
 
 This file is the entry point for any Claude / AI coding agent working in this repo. Read it before touching code or doing release work.

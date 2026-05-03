@@ -23,13 +23,9 @@ Works on **macOS**, **Windows**, and **Linux**, across multiple VS Code windows 
 
    If you ever need to re-run setup: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**.
 
-## What's New in v3.2
+## What's New in v3.3
 
-- **v3.2.1 — fix duplicate banner on Stop→waiting.** Claude Code often emits `Stop("completed")` and then `Notification("waiting for your input")` a few seconds apart for the same logical attention point. v3.2.0 treated the event-type change as a new stage and fired a second banner (typically right after you'd already glanced at the terminal for the first). The dedup now ignores event-type change entirely — only a new prompt or an explicit ack advances the stage.
-- **Stage-ID dedup replaces the 5-second session timer.** Each Claude session tracks a `stageId` that advances on (a) a `UserPromptSubmit` (you sent a new message) or (b) the previous stage being acknowledged. Acknowledgment means clicking the OS banner, using **Focus Terminal**, or already having focus on the matching terminal. Re-fires on an unresolved stage are suppressed at the source — no banner, no sound, no clipped audio. Removes the "ghost banner shows up minutes later for something I already dealt with" failure mode the old 5-second window couldn't catch.
-- **State moved out of `.vscode/`.** All coordination state (signal, click marker, claim marker, sessions) lives in `~/.claude/focus-state/<sha1(workspace).slice(0,12)>/`. It can never appear in your repo's `git status`, never confuse a teammate browsing `.vscode/`, and the **Add Signal Files to Global Gitignore** command is gone because it's no longer needed.
-- **New `UserPromptSubmit` hook.** Claude Code's `UserPromptSubmit` event bumps the session's stageId so the next notification after you respond is always treated as a fresh stage.
-- **`npm test`.** `lib/state-paths.js` and `lib/stage-dedup.js` ship with `node:test` unit tests covering the stage-machine transitions.
+- **Multi-profile hook auto-fix.** If you switch between Claude accounts using `CLAUDE_CONFIG_DIR` (`~/.claude-work`, `~/.claude-personal`, etc.), the extension now keeps every profile's hooks up to date — not only the default `~/.claude/`. Stale paths from older versions and missing `UserPromptSubmit` hooks are repaired automatically on the next VS Code reload, with a toast confirming which files were touched. Profiles named `~/.claude-backup-*` are left alone.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 

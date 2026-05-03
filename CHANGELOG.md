@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.3.0] - 2026-05-03
+
+### Added
+- **Multi-profile hook auto-fix.** The extension now scans every Claude Code config profile on the machine (`~/.claude/` plus any `~/.claude-*` directory used via `CLAUDE_CONFIG_DIR`) and updates stale hook paths or adds the missing `UserPromptSubmit` hook in each. Previously only the default profile (`~/.claude/settings.json`) was migrated, so users with multiple Claude accounts or workspace profiles silently broke after every extension upgrade — every hook fire in the un-migrated profile would `MODULE_NOT_FOUND`. `~/.claude-backup-*` directories are skipped (treated as user-owned backups, not active profiles).
+
+### Changed
+- `lib/hooks-installer.js` — `checkHookStatus`, `installHooks`, and `uninstallHooks` accept an optional `settingsPath`. New exports `discoverProfiles()` and `checkAllProfiles(extensionPath)`.
+
 ## [3.2.1] - 2026-05-01
 
 ### Fixed
