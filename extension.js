@@ -25,7 +25,7 @@ const {
   getStateDir
 } = require('./lib/state-paths');
 const { markResolved } = require('./lib/stage-dedup');
-const { checkHookStatus, installHooks, uninstallHooks } = require('./lib/hooks-installer');
+const { checkHookStatus, checkAllProfiles, installHooks, uninstallHooks } = require('./lib/hooks-installer');
 const { playSound, playSoundFile, resolveSoundPath, discoverSystemSounds } = require('./lib/sounds');
 
 const POLL_MS = 400;
@@ -116,7 +116,7 @@ vscode.commands.registerCommand('claudeNotifications.testNotification', () => cm
   );
 
   // --- Auto-fix stale hook paths, then first-run checks (sequential) ---
-  autoFixHookPaths(context, log).then(() => {
+  autoFixAllProfiles(context, log).then(() => {
     runFirstRunChecks(context, log, statusBarItem);
   });
 
@@ -655,19 +655,53 @@ function warnIfLegacyExtensionActive(context, log) {
   }, 3000);
 }
 
-// --- Auto-fix stale hook paths ---
+// --- Auto-fix stale hook paths across every Claude config profile ---
+//
+// Scans ~/.claude/ plus every ~/.claude-* sibling that already has our hooks
+// installed (CLAUDE_CONFIG_DIR profiles). Profiles with stale paths or a
+// missing UserPromptSubmit hook get repaired in place when autoSetupHooks=true.
+// When autoSetupHooks=false, the user is warned but nothing is touched.
 
-async function autoFixHookPaths(context, log) {
-  const { status, installedPath } = checkHookStatus(context.extensionPath);
-  if (status !== 'stale-path') return;
+async function autoFixAllProfiles(context, log) {
+  const config = vscode.workspace.getConfiguration('claudeNotifications');
+  const autoSetup = config.get('autoSetupHooks', true);
 
-  log.appendLine(`Hook path stale: ${installedPath} -> ${context.extensionPath}`);
-  const result = installHooks(context.extensionPath, {});
-  if (result.success) {
-    log.appendLine('Hook paths updated automatically');
+  const results = checkAllProfiles(context.extensionPath);
+  const needsFix = results.filter(r => r.status === 'stale-path' || r.status === 'partial');
+
+  if (needsFix.length === 0) return;
+
+  const fixed = [];
+  const failed = [];
+  for (const profile of needsFix) {
+    log.appendLine(`Profile needs fix: ${profile.path} (status=${profile.status}, installed=${profile.installedPath || 'n/a'})`);
+    if (!autoSetup) continue;
+    const result = installHooks(context.extensionPath, { settingsPath: profile.path });
+    if (result.success) {
+      fixed.push(profile.path);
+    } else {
+      failed.push({ path: profile.path, message: result.message });
+    }
+  }
+
+  if (fixed.length > 0) {
+    log.appendLine(`Auto-fixed hook paths in ${fixed.length} profile(s): ${fixed.join(', ')}`);
     updateStatusBar(_statusBarItem, context.extensionPath);
-  } else {
-    log.appendLine(`Failed to update hook paths: ${result.message}`);
+    const summary = fixed.length === 1
+      ? `Claude Notifications: updated stale hook paths in ${path.basename(path.dirname(fixed[0]))}/settings.json.`
+      : `Claude Notifications: updated stale hook paths in ${fixed.length} Claude profiles. Restart any active 'claude' sessions for the change to take effect.`;
+    vscode.window.showInformationMessage(summary);
+  }
+
+  for (const f of failed) {
+    log.appendLine(`Failed to update ${f.path}: ${f.message}`);
+  }
+
+  if (!autoSetup) {
+    const profileNames = needsFix.map(p => path.basename(path.dirname(p.path))).join(', ');
+    vscode.window.showWarningMessage(
+      `Claude Notifications: stale or incomplete hooks detected in ${needsFix.length} Claude profile(s) (${profileNames}). Run "Claude Notifications: Set Up Hooks" or enable claudeNotifications.autoSetupHooks.`
+    );
   }
 }
 
