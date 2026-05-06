@@ -2,7 +2,7 @@
 
 > Project: **Claude Notifications** — VS Code extension (publisher `dimokol`, id `dimokol.claude-notifications`).
 > Repo name on disk: `claude-terminal-focus` (legacy directory name; do not rename, the publisher id is what users see).
-> Current version: **3.3.0**.
+> Current version: **3.3.1**.
 > User: solo maintainer, dev machine is macOS, target users are Claude Code users on macOS / Windows / Linux.
 
 This file is the entry point for any Claude / AI coding agent working in this repo. Read it before touching code or doing release work.
@@ -35,6 +35,7 @@ repo root
 │   ├── signals.js            # Signal-file parsing + atomic claim marker (`O_EXCL`).
 │   ├── state-paths.js        # ~/.claude/focus-state/<sha1(workspace).slice(0,12)>/ path derivation.
 │   ├── stage-dedup.js        # Stage-ID state machine (shouldNotify, advanceOnPrompt, markResolved).
+│   ├── click-marker.js       # Parse/build the JSON payload terminal-notifier writes on click.
 │   ├── hooks-installer.js    # Read/write ~/.claude/settings.json hook entries.
 │   └── sounds.js             # Cross-platform sound playback.
 │
@@ -52,8 +53,11 @@ repo root
 
 ```
 ~/.claude/focus-state/<sha1(workspaceRoot).slice(0,12)>/
-  signal       # JSON v2 signal file (event, sessionId, pids, project, state)
-  clicked      # zero-byte marker dropped by terminal-notifier -execute
+  signal       # JSON v2 signal file (event, sessionId, pids, project, state) — shared per workspace
+  clicked      # JSON click marker written by terminal-notifier -execute. Carries the originating
+               #   session's pids/sessionId/event/project so click-to-focus targets the right
+               #   terminal even if a sibling session has since overwritten `signal`. Empty
+               #   pre-v3.3.1 markers fall back to the signal file.
   claimed      # atomic claim marker (O_EXCL, 5 s lifespan)
   sessions     # JSON map: { sessionId: { stageId, lastEvent, resolved, lastNotifiedAt, updatedAt } }
 ```
@@ -67,15 +71,22 @@ shouldNotify(workspaceRoot, sessionId, currentEvent):
   - no sessionId            → notify (can't dedup safely)
   - no entry for session    → create stage 1, notify
   - lastEvent === null      → set lastEvent=current, notify (post-prompt fresh stage)
-  - resolved || lastEvent !== current → stageId++, notify
-  - else                    → SUPPRESS
+  - resolved === true       → stageId++, lastEvent=current, resolved=false, notify
+  - else (unresolved stage) → update lastEvent=current, SUPPRESS
+                              (collapses Claude's Stop→Notification pair into one alert)
 
 advanceOnPrompt(workspaceRoot, sessionId):  # called by hook-user-prompt.js
   stageId++, lastEvent=null, resolved=false
 
-markResolved(workspaceRoot, sessionId):     # called by extension at ack paths
+markResolved(workspaceRoot, sessionId):     # called by extension on EXPLICIT user ack only
   resolved=true
 ```
+
+**Important — what counts as an "ack" for `markResolved`:** Focus-Terminal toast click,
+OS-banner click. The "Already on correct terminal" sound-only path **does not** call
+`markResolved`; doing so would prematurely re-open the gate and let the immediate
+follow-up event in the same stage (e.g. Notification right after Stop) re-fire as a
+duplicate sound. v3.3.1 fixed exactly this regression.
 
 The unit tests in `test/stage-dedup.test.js` are the authoritative spec — if you change the state machine, update the tests and verify they still describe the intended behavior.
 
@@ -106,7 +117,7 @@ npm run build         # node esbuild.js — produces dist/extension.js, dist/hoo
 npm test              # node --test test/*.test.js
 ```
 
-Currently 14 tests across `state-paths` and `stage-dedup`. There is **no UI test harness** for the extension itself — `extension.js` is verified manually via the steps in the relevant plan's "End-to-end manual verification" task. If you add new pure logic, write `node:test` tests for it.
+Currently 32 tests across `state-paths`, `stage-dedup`, `hooks-installer`, and `click-marker`. There is **no UI test harness** for the extension itself — `extension.js` is verified manually via the steps in the relevant plan's "End-to-end manual verification" task. If you add new pure logic, write `node:test` tests for it.
 
 ### Manual smoke-test the hook outside VS Code
 
@@ -193,6 +204,8 @@ Always run through this before `vsce publish` (or `vsce package` for a manual VS
 | Duplicate banners | `~/.claude/focus-state/<hash>/sessions` — is `resolved` getting set on ack? Read `extension.js` ack paths. Re-check `stage-dedup.js#shouldNotify`. |
 | No banners at all | `~/.claude/settings.json` hook entries (`hooks.Stop[*].hooks[*].command` should point at `dist/hook.js`). Then check `hook.js` for early-exits (muted, event disabled, dedup suppressed). |
 | Wrong terminal focused | "Claude Notifications" Output channel. Look for `pids=[...]` and `Active terminal after switch`. The PID match logic is in `extension.js#focusMatchingTerminal`. |
+| Wrong terminal after OS-banner click | Look for `Click-to-focus [marker]` vs `[signal-fallback]` in the log. `[marker]` should be the common path. `[signal-fallback]` means the click marker was empty/stale/corrupt — the per-workspace signal file is shared and may point at a sibling session. The marker payload itself is built in `hook.js` (terminal-notifier `-execute`) and parsed by `lib/click-marker.js`. |
+| "Already on correct terminal" duplicate sound | The auto-correct-terminal path in `extension.js` MUST NOT call `markResolved`. If it does, the next event in the same stage (Stop→Notification) will re-fire because `shouldNotify` sees `resolved=true` and bumps to a new stage. See v3.3.1 fix. |
 | Hook never fires | `~/.claude/settings.json` — was the hook installed? Did the user restart their `claude` session after install? |
 | Build error | `node esbuild.js` output. Most often a require pointing at a deleted file — grep the `lib/` tree. |
 | Marketplace install error | `extensionDependencies` resolution. See publish checklist. |
@@ -204,7 +217,7 @@ Always run through this before `vsce publish` (or `vsce package` for a manual VS
 - **User's role:** solo developer; this is a personal/portfolio extension. Not yet published to the VS Code Marketplace at the time of this writing — currently distributed by VSIX install.
 - **Quality bar:** ship-quality but not enterprise. The user prefers concise, decisive recommendations to long deliberation. Confirm before destructive ops; otherwise proceed.
 - **Testing reality:** primary dev machine is macOS. Windows testing happens later, on a separate machine. Keep platform-specific code in clearly labeled branches.
-- **No production users yet** as of v3.2.0 — clean cutovers are preferred over migration shims.
+- **No production users yet** as of v3.3.1 — clean cutovers are preferred over migration shims.
 
 ---
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.3.1] - 2026-05-06
+
+### Fixed
+- **OS-banner click focused the wrong terminal in multi-session workspaces.** When two or more Claude Code sessions were running in the same VS Code workspace, clicking a banner from session B would sometimes leave the terminal panel on session A. The click marker created by `terminal-notifier`'s `-execute` was an empty `touch` file with no payload, so `handleClickedSignal` had to read the per-workspace `signal` file to recover which terminal to focus — but that file is shared across sessions and gets overwritten by every hook firing. The marker now embeds a JSON payload of the originating session's `pids`, `sessionId`, `event`, and `project`. The signal file remains as a best-effort fallback for legacy/empty/stale markers.
+- **Duplicate sound on the "already on correct terminal" path.** The extension was calling `markResolved()` whenever it claimed a signal while the matching terminal was active. Setting `resolved=true` corrupted the dedup state machine: the immediate follow-up event in the same stage (e.g. Notification right after Stop, ~1 s apart) hit the resolved branch in `shouldNotify`, advanced to a new stageId, and re-fired as a second sound. `markResolved` is now reserved for *explicit* user acks (Focus-Terminal click, OS-banner click); the auto-correct-terminal path lets the dedup state machine collapse Stop→Notification naturally.
+
+### Added
+- `lib/click-marker.js` — `parseClickMarker` / `buildClickMarkerPayload` with `node:test` coverage for the legacy empty-touch fallback, JSON shell-escape round-trip, stale-timestamp rejection, and pid sanitization.
+- Click-handler logs now show `Click-to-focus [marker]` vs `[signal-fallback]` so it's obvious in the Output channel which source supplied the pids.
+
+### Changed
+- `CLAUDE.md` updated: the stage-dedup spec now matches the actual code (different event types within an unresolved stage are *suppressed*, not promoted to a new stage), and a new troubleshooting row covers click-marker provenance.
+
 ## [3.3.0] - 2026-05-03
 
 ### Added

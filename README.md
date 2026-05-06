@@ -23,9 +23,11 @@ Works on **macOS**, **Windows**, and **Linux**, across multiple VS Code windows 
 
    If you ever need to re-run setup: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**.
 
-## What's New in v3.3
+## What's New in v3.3.1
 
-- **Multi-profile hook auto-fix.** If you switch between Claude accounts using `CLAUDE_CONFIG_DIR` (`~/.claude-work`, `~/.claude-personal`, etc.), the extension now keeps every profile's hooks up to date — not only the default `~/.claude/`. Stale paths from older versions and missing `UserPromptSubmit` hooks are repaired automatically on the next VS Code reload, with a toast confirming which files were touched. Profiles named `~/.claude-backup-*` are left alone.
+- **OS-banner click now focuses the right terminal in multi-session workspaces.** When two or more Claude Code sessions ran side-by-side in the same VS Code window, clicking a banner from session B sometimes left the panel on session A — the click marker carried no payload, so we depended on a per-workspace signal file that the next session's hook would overwrite. The marker now embeds the originating session's pids, sessionId, event, and project directly.
+- **No more duplicate sound when you're already on the correct Claude terminal.** Claude Code commonly fires `Stop` immediately followed by `Notification("waiting")` for one logical attention point. v3.3.1 stops the in-window claim path from prematurely marking the stage as resolved, so the dedup state machine collapses both events into a single sound as intended.
+- **Multi-profile hook auto-fix** (carried over from v3.3.0): every Claude profile's hooks (`~/.claude/`, `~/.claude-*`) is kept up to date on activation.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 

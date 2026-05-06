@@ -28,6 +28,7 @@ const {
   getClaimedPath
 } = require('./lib/state-paths');
 const { shouldNotify: checkShouldNotify } = require('./lib/stage-dedup');
+const { buildClickMarkerPayload } = require('./lib/click-marker');
 
 const CONFIG_FILE = 'claude-notifications-config.json';
 const DEFAULT_HANDSHAKE_MS = 1200;
@@ -294,10 +295,16 @@ function shEsc(s) {
     const codeCli = findCodeCli();
     try {
       execSync('command -v terminal-notifier', { stdio: 'ignore' });
-      // On click: drop a "clicked" marker (so the extension knows to focus
-      // the terminal without showing an extra in-window toast) then open
-      // the workspace.
-      const executeCmd = `/usr/bin/touch ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
+      // On click: write a JSON click-marker carrying THIS session's
+      // pids/sessionId/event so the extension focuses the right terminal
+      // even if a sibling session's hook has since overwritten the shared
+      // signal file. Pre-v3.3.1 used an empty `touch` marker, which made
+      // multi-session workspaces focus whichever session wrote the signal
+      // file last instead of the one whose banner the user actually clicked.
+      const clickPayload = buildClickMarkerPayload({
+        sessionId, pids, event: hookEvent, project: projectName
+      });
+      const executeCmd = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
       const child = spawn('terminal-notifier', [
         '-title', eventInfo.title,
         '-message', eventInfo.message,

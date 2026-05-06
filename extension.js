@@ -25,6 +25,7 @@ const {
   getStateDir
 } = require('./lib/state-paths');
 const { markResolved } = require('./lib/stage-dedup');
+const { parseClickMarker } = require('./lib/click-marker');
 const { checkHookStatus, checkAllProfiles, installHooks, uninstallHooks } = require('./lib/hooks-installer');
 const { playSound, playSoundFile, resolveSoundPath, discoverSystemSounds } = require('./lib/sounds');
 
@@ -200,13 +201,20 @@ async function handleSignal(signalPath, workspaceRoot, log) {
   const wantToast = eventSetting === 'Sound + Notification' || eventSetting === 'Notification only';
 
   // Case A: focused + correct terminal → sound only (configurable).
+  // We deliberately do NOT call markResolved here. The dedup state machine
+  // in lib/stage-dedup.js already collapses the Stop→Notification pair
+  // Claude fires for one logical attention point: the second event hits
+  // the unresolved-stage branch and gets suppressed before hook.js writes
+  // a signal. markResolved would set resolved=true and re-open the gate,
+  // causing a duplicate sound for the very next event in the same stage.
+  // markResolved stays reserved for explicit user acknowledgment (Focus
+  // Terminal click, OS banner click).
   const activeTerminal = vscode.window.activeTerminal;
   if (activeTerminal) {
     try {
       const activePid = await activeTerminal.processId;
       if (activePid && signal.pids.includes(activePid)) {
-        log.appendLine('Already on correct terminal — sound only (if enabled)');
-        markResolved(workspaceRoot, signal.sessionId);
+        log.appendLine('Already on correct terminal — sound only (dedup will suppress same-stage re-fires)');
         const soundWhenFocused = vscode.workspace.getConfiguration('claudeNotifications').get('soundWhenFocused', 'sound');
         if (soundWhenFocused === 'sound' && wantSound) {
           playEventSound(signal.event, config);
@@ -237,32 +245,65 @@ async function handleSignal(signalPath, workspaceRoot, log) {
 
 /**
  * Handle the case where the user clicked an OS banner. hook.js already
- * fired the notification and terminal-notifier dropped the clicked marker.
- * Focus the matching terminal and clean up — no toast (user's intent is
- * already clear).
+ * fired the notification; terminal-notifier's -execute payload wrote a
+ * JSON click marker carrying the originating session's pids/sessionId/
+ * event. Prefer that marker as the source of truth — the per-workspace
+ * `signal` file is shared across all Claude sessions and may have been
+ * overwritten by a sibling hook firing in the meantime, which previously
+ * caused us to focus the wrong terminal.
+ *
+ * Legacy markers (empty file, pre-v3.3.1) and stale/corrupt JSON fall
+ * back to the signal file as a best-effort second source of truth.
  */
 async function handleClickedSignal(workspaceRoot, log) {
   const clickedPath = getClickedPath(workspaceRoot);
   const signalPath = getSignalPath(workspaceRoot);
 
-  let signal = null;
+  let clickPayload = null;
   try {
-    const content = fs.readFileSync(signalPath, 'utf8');
-    signal = parseSignal(content);
+    const content = fs.readFileSync(clickedPath, 'utf8');
+    clickPayload = parseClickMarker(content);
   } catch (_) {}
 
-  // Cleanup regardless
+  let target = null; // { sessionId, pids, event, project, source }
+  if (clickPayload && !clickPayload.legacy && !clickPayload.stale && clickPayload.pids && clickPayload.pids.length > 0) {
+    target = { ...clickPayload, source: 'marker' };
+  } else {
+    if (clickPayload && clickPayload.stale) {
+      log.appendLine('Click marker is stale (>5min) — falling back to signal file');
+    } else if (clickPayload && clickPayload.legacy) {
+      log.appendLine('Click marker has legacy empty payload — falling back to signal file');
+    }
+    let signal = null;
+    try {
+      const content = fs.readFileSync(signalPath, 'utf8');
+      signal = parseSignal(content);
+    } catch (_) {}
+    if (signal && signal.pids.length > 0) {
+      target = {
+        sessionId: signal.sessionId,
+        pids: signal.pids,
+        event: signal.event,
+        project: signal.project,
+        source: 'signal-fallback'
+      };
+    }
+  }
+
+  // Cleanup regardless of whether we recovered a target.
   try { fs.unlinkSync(clickedPath); } catch (_) {}
   try { fs.unlinkSync(signalPath); } catch (_) {}
   try { fs.unlinkSync(getClaimedPath(workspaceRoot)); } catch (_) {}
 
-  if (signal && signal.pids.length > 0) {
-    const rawEvent = signal.hookEventName || '?';
-    const sessionTag = signal.sessionId ? signal.sessionId.slice(0, 8) : '?';
-    log.appendLine(`Click-to-focus — event=${signal.event}(${rawEvent}), session=${sessionTag}, project=${signal.project}, pids=[${signal.pids.join(',')}]`);
-    await focusMatchingTerminal(signal.pids, log);
-    markResolved(workspaceRoot, signal.sessionId);
+  if (!target) {
+    log.appendLine('Click-to-focus: no recoverable session payload (marker missing/stale and signal file gone) — opened workspace without switching terminal');
+    return;
   }
+
+  const sessionTag = target.sessionId ? target.sessionId.slice(0, 8) : '?';
+  log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]`);
+  await focusMatchingTerminal(target.pids, log);
+  markResolved(workspaceRoot, target.sessionId);
 }
 
 function markSignalFired(signalPath) {

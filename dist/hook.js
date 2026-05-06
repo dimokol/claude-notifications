@@ -224,6 +224,45 @@ var require_stage_dedup = __commonJS({
   }
 });
 
+// lib/click-marker.js
+var require_click_marker = __commonJS({
+  "lib/click-marker.js"(exports2, module2) {
+    var CLICK_MARKER_STALE_MS = 5 * 60 * 1e3;
+    function parseClickMarker(content) {
+      if (typeof content !== "string" || content.trim() === "") {
+        return { legacy: true };
+      }
+      let data;
+      try {
+        data = JSON.parse(content);
+      } catch (_) {
+        return { legacy: true };
+      }
+      if (!data || typeof data !== "object") return { legacy: true };
+      if (typeof data.timestamp === "number" && Date.now() - data.timestamp > CLICK_MARKER_STALE_MS) {
+        return { stale: true };
+      }
+      return {
+        sessionId: typeof data.sessionId === "string" ? data.sessionId : "",
+        event: data.event === "completed" ? "completed" : "waiting",
+        project: typeof data.project === "string" ? data.project : "Unknown",
+        pids: Array.isArray(data.pids) ? data.pids.filter((p) => Number.isInteger(p) && p > 0) : [],
+        timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now()
+      };
+    }
+    function buildClickMarkerPayload2({ sessionId, pids, event, project }) {
+      return JSON.stringify({
+        sessionId: sessionId || "",
+        event: event === "completed" ? "completed" : "waiting",
+        project: project || "Unknown",
+        pids: Array.isArray(pids) ? pids : [],
+        timestamp: Date.now()
+      });
+    }
+    module2.exports = { parseClickMarker, buildClickMarkerPayload: buildClickMarkerPayload2, CLICK_MARKER_STALE_MS };
+  }
+});
+
 // hook.js
 var fs = require("fs");
 var path = require("path");
@@ -238,6 +277,7 @@ var {
   getClaimedPath
 } = require_state_paths();
 var { shouldNotify: checkShouldNotify } = require_stage_dedup();
+var { buildClickMarkerPayload } = require_click_marker();
 var CONFIG_FILE = "claude-notifications-config.json";
 var DEFAULT_HANDSHAKE_MS = 1200;
 function shEsc(s) {
@@ -443,7 +483,13 @@ function shEsc(s) {
     const codeCli = findCodeCli();
     try {
       execSync("command -v terminal-notifier", { stdio: "ignore" });
-      const executeCmd = `/usr/bin/touch ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
+      const clickPayload = buildClickMarkerPayload({
+        sessionId,
+        pids,
+        event: hookEvent,
+        project: projectName
+      });
+      const executeCmd = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
       const child = spawn("terminal-notifier", [
         "-title",
         eventInfo.title,
