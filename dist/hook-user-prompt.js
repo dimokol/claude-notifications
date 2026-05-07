@@ -11,8 +11,18 @@ var require_state_paths = __commonJS({
     var os = require("os");
     var path2 = require("path");
     var STATE_ROOT = path2.join(os.homedir(), ".claude", "focus-state");
+    function normalizeWorkspaceRoot(workspaceRoot) {
+      let s = String(workspaceRoot).replace(/\\/g, "/");
+      if (process.platform === "win32") {
+        s = s.replace(/^([a-zA-Z]):/, (_m, d) => d.toLowerCase() + ":");
+      }
+      if (s.length > 1 && s.endsWith("/") && !s.endsWith(":/")) {
+        s = s.slice(0, -1);
+      }
+      return s;
+    }
     function hashWorkspace(workspaceRoot) {
-      return crypto.createHash("sha1").update(String(workspaceRoot)).digest("hex").slice(0, 12);
+      return crypto.createHash("sha1").update(normalizeWorkspaceRoot(workspaceRoot)).digest("hex").slice(0, 12);
     }
     function getStateDir2(workspaceRoot) {
       return path2.join(STATE_ROOT, hashWorkspace(workspaceRoot));
@@ -32,6 +42,7 @@ var require_state_paths = __commonJS({
     module2.exports = {
       STATE_ROOT,
       hashWorkspace,
+      normalizeWorkspaceRoot,
       getStateDir: getStateDir2,
       getSignalPath,
       getClickedPath,

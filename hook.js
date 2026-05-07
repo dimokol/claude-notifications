@@ -320,29 +320,66 @@ function shEsc(s) {
       } catch (_) {}
     }
   } else if (process.platform === 'win32') {
+    // Why this is convoluted: an inline `powershell -Command <script>` launched
+    // via `spawn(..., {detached:true, stdio:'ignore'})` on Windows is *not*
+    // truly orphaned — it stays inside the parent's job object. When Claude
+    // Code's hook returns and tears down its process tree, the still-cold
+    // PowerShell child can get killed before WinRT's
+    // `ToastNotificationManager.CreateToastNotifier(...).Show(...)` finishes
+    // registering the toast with the OS — sound has already fired (hook.js
+    // owns that), but the banner never appears and the toast doesn't even
+    // land in Action Center.
+    //
+    // The proven pattern (also what the v2 PS1 setup used) is:
+    //   1. Drop the script to a temp .ps1 file.
+    //   2. Launch via `cmd /c start "" /B powershell.exe -File <tmp>` —
+    //      `start` allocates a fresh process group / detaches from the
+    //      parent's job, so the toast survives the hook tearing down.
+    //   3. End the script with a small `Start-Sleep` so the WinRT call has
+    //      headroom to complete before the spawned PowerShell exits.
+    //   4. Self-delete the temp file at the end of the script (own cleanup,
+    //      no orphan files in %TEMP%).
     const vscodePath = workspaceRoot.replace(/\\/g, '/');
     const vscodeUri = `vscode://file/${vscodePath}`;
-    const psScript = `
-      [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-      [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-      $template = @"
-      <toast activationType="protocol" launch="${vscodeUri}" duration="long">
-        <visual><binding template="ToastGeneric">
-          <text>${eventInfo.title}</text>
-          <text>${eventInfo.message}</text>
-        </binding></visual>
-        <audio src="ms-winsoundevent:Notification.Default" silent="true" />
-      </toast>
+    const tmpScript = path.join(os.tmpdir(), `claude-notif-${Date.now()}-${process.pid}.ps1`);
+    const psScriptBody = `
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$template = @"
+<toast activationType="protocol" launch="${vscodeUri}" duration="long">
+  <visual><binding template="ToastGeneric">
+    <text>${eventInfo.title}</text>
+    <text>${eventInfo.message}</text>
+  </binding></visual>
+  <audio src="ms-winsoundevent:Notification.Default" silent="true" />
+</toast>
 "@
-      $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-      $xml.LoadXml($template)
-      $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-      [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Microsoft.Windows.Shell.RunDialog").Show($toast)
-    `;
-    const child = spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript], {
-      detached: true, stdio: 'ignore'
-    });
-    child.unref();
+try {
+  $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+  $xml.LoadXml($template)
+  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Microsoft.Windows.Shell.RunDialog").Show($toast)
+  Start-Sleep -Milliseconds 250
+} finally {
+  Remove-Item -LiteralPath '${tmpScript.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue
+}
+`;
+    try {
+      fs.writeFileSync(tmpScript, psScriptBody, 'utf8');
+      const child = spawn('cmd.exe', [
+        '/c', 'start', '""', '/B',
+        'powershell.exe',
+        '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+        '-File', tmpScript
+      ], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      child.unref();
+    } catch (_) {
+      try { fs.unlinkSync(tmpScript); } catch (_) {}
+    }
   } else {
     try {
       const child = spawn('notify-send', [

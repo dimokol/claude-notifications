@@ -23,11 +23,12 @@ Works on **macOS**, **Windows**, and **Linux**, across multiple VS Code windows 
 
    If you ever need to re-run setup: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**.
 
-## What's New in v3.3.1
+## What's New in v3.3.2
 
-- **OS-banner click now focuses the right terminal in multi-session workspaces.** When two or more Claude Code sessions ran side-by-side in the same VS Code window, clicking a banner from session B sometimes left the panel on session A — the click marker carried no payload, so we depended on a per-workspace signal file that the next session's hook would overwrite. The marker now embeds the originating session's pids, sessionId, event, and project directly.
-- **No more duplicate sound when you're already on the correct Claude terminal.** Claude Code commonly fires `Stop` immediately followed by `Notification("waiting")` for one logical attention point. v3.3.1 stops the in-window claim path from prematurely marking the stage as resolved, so the dedup state machine collapses both events into a single sound as intended.
-- **Multi-profile hook auto-fix** (carried over from v3.3.0): every Claude profile's hooks (`~/.claude/`, `~/.claude-*`) is kept up to date on activation.
+- **Windows: in-window toasts and the claim race now actually work.** On Windows, `hook.js` and `extension.js` were each computing the per-workspace state-directory hash from a different string for the same workspace (`C:/WebDev/foo` vs `c:\WebDev\foo`), so the extension's polling loop watched an empty directory and never saw any signal. The OS-banner fallback in `hook.js` always won, leaving Windows users with sound-only notifications, no in-window toast, and an empty Output channel. Paths are now normalized before hashing — macOS and Linux unaffected (no-op on POSIX).
+- **Windows: OS-banner toast now reliably appears.** Sound was firing but the banner often never popped (and the toast didn't even land in Action Center) because PowerShell, launched as a detached child running an inline `-Command` script, was getting killed inside the parent's job object before WinRT's `ToastNotifier.Show()` finished registering. `hook.js` now writes the toast script to a temp `.ps1` and launches it via `cmd /c start /B`, which fully detaches into a new process group — matching the v2 PowerShell setup that was known to work.
+- **OS-banner click focuses the right terminal in multi-session workspaces** (v3.3.1): the click marker now carries the originating session's pids/sessionId/event so a sibling session's hook can't redirect the click to the wrong terminal.
+- **No more duplicate sound when you're already on the correct Claude terminal** (v3.3.1): the auto-correct-terminal path no longer prematurely marks the dedup stage as resolved, so Claude's near-simultaneous `Stop` + `Notification("waiting")` pair collapses to a single sound as intended.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 

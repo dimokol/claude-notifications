@@ -97,8 +97,18 @@ var require_state_paths = __commonJS({
     var os2 = require("os");
     var path2 = require("path");
     var STATE_ROOT = path2.join(os2.homedir(), ".claude", "focus-state");
+    function normalizeWorkspaceRoot(workspaceRoot) {
+      let s = String(workspaceRoot).replace(/\\/g, "/");
+      if (process.platform === "win32") {
+        s = s.replace(/^([a-zA-Z]):/, (_m, d) => d.toLowerCase() + ":");
+      }
+      if (s.length > 1 && s.endsWith("/") && !s.endsWith(":/")) {
+        s = s.slice(0, -1);
+      }
+      return s;
+    }
     function hashWorkspace(workspaceRoot) {
-      return crypto.createHash("sha1").update(String(workspaceRoot)).digest("hex").slice(0, 12);
+      return crypto.createHash("sha1").update(normalizeWorkspaceRoot(workspaceRoot)).digest("hex").slice(0, 12);
     }
     function getStateDir2(workspaceRoot) {
       return path2.join(STATE_ROOT, hashWorkspace(workspaceRoot));
@@ -118,6 +128,7 @@ var require_state_paths = __commonJS({
     module2.exports = {
       STATE_ROOT,
       hashWorkspace,
+      normalizeWorkspaceRoot,
       getStateDir: getStateDir2,
       getSignalPath: getSignalPath2,
       getClickedPath: getClickedPath2,
@@ -513,28 +524,56 @@ function shEsc(s) {
   } else if (process.platform === "win32") {
     const vscodePath = workspaceRoot.replace(/\\/g, "/");
     const vscodeUri = `vscode://file/${vscodePath}`;
-    const psScript = `
-      [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-      [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-      $template = @"
-      <toast activationType="protocol" launch="${vscodeUri}" duration="long">
-        <visual><binding template="ToastGeneric">
-          <text>${eventInfo.title}</text>
-          <text>${eventInfo.message}</text>
-        </binding></visual>
-        <audio src="ms-winsoundevent:Notification.Default" silent="true" />
-      </toast>
+    const tmpScript = path.join(os.tmpdir(), `claude-notif-${Date.now()}-${process.pid}.ps1`);
+    const psScriptBody = `
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$template = @"
+<toast activationType="protocol" launch="${vscodeUri}" duration="long">
+  <visual><binding template="ToastGeneric">
+    <text>${eventInfo.title}</text>
+    <text>${eventInfo.message}</text>
+  </binding></visual>
+  <audio src="ms-winsoundevent:Notification.Default" silent="true" />
+</toast>
 "@
-      $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-      $xml.LoadXml($template)
-      $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-      [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Microsoft.Windows.Shell.RunDialog").Show($toast)
-    `;
-    const child = spawn("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript], {
-      detached: true,
-      stdio: "ignore"
-    });
-    child.unref();
+try {
+  $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+  $xml.LoadXml($template)
+  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Microsoft.Windows.Shell.RunDialog").Show($toast)
+  Start-Sleep -Milliseconds 250
+} finally {
+  Remove-Item -LiteralPath '${tmpScript.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue
+}
+`;
+    try {
+      fs.writeFileSync(tmpScript, psScriptBody, "utf8");
+      const child = spawn("cmd.exe", [
+        "/c",
+        "start",
+        '""',
+        "/B",
+        "powershell.exe",
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        tmpScript
+      ], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      });
+      child.unref();
+    } catch (_) {
+      try {
+        fs.unlinkSync(tmpScript);
+      } catch (_2) {
+      }
+    }
   } else {
     try {
       const child = spawn("notify-send", [

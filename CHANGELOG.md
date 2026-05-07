@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.3.2] - 2026-05-08
+
+### Fixed
+- **Windows: in-window toasts and the claim race were silently broken.** The state-directory hash is computed from the workspace path, but the two layers feed it different strings: `hook.js` receives `CLAUDE_PROJECT_DIR` from Claude Code (forward-slash, often uppercase drive — e.g. `C:/WebDev/foo`), while `extension.js` reads VS Code's `folder.uri.fsPath` (backslash, kernel drive case — e.g. `c:\WebDev\foo`). The two SHA1s diverge, the extension's polling loop watches an empty directory, and the OS-banner fallback in `hook.js` always wins — giving the user sound only, no in-window toast, no Output-channel logs, and no claim race to deduplicate against. `lib/state-paths.js` now normalizes the path before hashing: forward-slashes, lowercased Windows drive letter, no trailing slash. macOS and Linux are unaffected — the normalization is a no-op on POSIX paths.
+- **Windows: OS-banner toast didn't reliably fire from `hook.js`.** Sound played, no banner appeared, and the toast often didn't even show up in Action Center. Root cause: the WinRT `ToastNotificationManager.CreateToastNotifier(...).Show(...)` call was made from a PowerShell process spawned with `spawn(..., {detached: true, stdio: 'ignore'})` running an inline `-Command <script>` — but on Windows that pattern leaves the child inside the parent's job object, so when Claude Code tore down its hook process tree the still-warming-up PowerShell child got killed before WinRT finished registering the toast. Fix: `hook.js` now writes the toast script to a temp `.ps1` and launches it via `cmd /c start "" /B powershell -File <tmp>`, which fully detaches via `start`'s new process group; the script ends with a small `Start-Sleep` to give WinRT room to complete and self-deletes the temp file in a `try/finally`. Matches the pattern the v2 PS1 setup used (which is where we know it worked).
+
+### Added
+- `normalizeWorkspaceRoot()` exported from `lib/state-paths.js` plus `node:test` coverage that every plausible Windows path-style variant (`C:/`, `c:/`, `C:\`, `c:\`, with/without trailing slash) hashes to a single state directory.
+
 ## [3.3.1] - 2026-05-06
 
 ### Fixed
