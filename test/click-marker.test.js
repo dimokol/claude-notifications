@@ -125,3 +125,37 @@ test('parseClickMarker returns aiTitle="" when missing or non-string', () => {
   }));
   assert.strictEqual(b.aiTitle, '');
 });
+
+test('buildClickMarkerPayload includes shellPid, workspaceRoot, projectDir when provided', () => {
+  const payload = buildClickMarkerPayload({
+    sessionId: 'abc', pids: [1, 2, 3], shellPid: 18832,
+    workspaceRoot: 'd:\\proj', projectDir: 'd:\\proj',
+    event: 'completed', project: 'proj'
+  });
+  const parsed = JSON.parse(payload);
+  assert.strictEqual(parsed.shellPid, 18832);
+  assert.strictEqual(parsed.workspaceRoot, 'd:\\proj');
+  assert.strictEqual(parsed.projectDir, 'd:\\proj');
+});
+
+test('parseClickMarker round-trips shellPid / workspaceRoot / projectDir', () => {
+  const payload = buildClickMarkerPayload({
+    sessionId: 'abc', pids: [1], shellPid: 18832,
+    workspaceRoot: '/home/u/proj', projectDir: '/home/u/proj',
+    event: 'waiting', project: 'proj'
+  });
+  const parsed = parseClickMarker(payload);
+  assert.strictEqual(parsed.shellPid, 18832);
+  assert.strictEqual(parsed.workspaceRoot, '/home/u/proj');
+  assert.strictEqual(parsed.projectDir, '/home/u/proj');
+});
+
+test('parseClickMarker defaults new fields when missing', () => {
+  const raw = JSON.stringify({
+    sessionId: 's', event: 'waiting', project: 'demo', pids: [1], timestamp: Date.now()
+  });
+  const parsed = parseClickMarker(raw);
+  assert.strictEqual(parsed.shellPid, 0);
+  assert.strictEqual(parsed.workspaceRoot, '');
+  assert.strictEqual(parsed.projectDir, '');
+});

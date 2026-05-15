@@ -214,9 +214,11 @@ async function handleSignal(signalPath, workspaceRoot, log) {
   const activeTerminal = vscode.window.activeTerminal;
   if (activeTerminal) {
     try {
-      const activePid = await activeTerminal.processId;
-      if (activePid && signal.pids.includes(activePid)) {
-        log.appendLine('Already on correct terminal — sound only (dedup will suppress same-stage re-fires)');
+      const activeIndex = vscode.window.terminals.indexOf(activeTerminal);
+      const desc = await describeTerminalForMatch(activeTerminal, activeIndex);
+      const m = matchTerminal([desc], signal);
+      if (m) {
+        log.appendLine(`Already on correct terminal — sound only (tier=${m.tier}, ${m.reason})`);
         const soundWhenFocused = vscode.workspace.getConfiguration('claudeNotifications').get('soundWhenFocused', 'sound');
         if (soundWhenFocused === 'sound' && wantSound) {
           playEventSound(signal.event, config);
@@ -238,7 +240,7 @@ async function handleSignal(signalPath, workspaceRoot, log) {
 
     if (action === 'Focus Terminal') {
       log.appendLine('User clicked Focus Terminal');
-      await focusMatchingTerminal(signal.pids, log);
+      await focusMatchingTerminal(signal, log);
       markResolved(workspaceRoot, signal.sessionId);
     }
   }
@@ -266,7 +268,7 @@ async function handleClickedSignal(workspaceRoot, log) {
     clickPayload = parseClickMarker(content);
   } catch (_) {}
 
-  let target = null; // { sessionId, pids, event, project, source }
+  let target = null; // pseudo-signal { sessionId, pids, shellPid, workspaceRoot, projectDir, event, project, source }
   if (clickPayload && !clickPayload.legacy && !clickPayload.stale && clickPayload.pids && clickPayload.pids.length > 0) {
     target = { ...clickPayload, source: 'marker' };
   } else {
@@ -284,6 +286,9 @@ async function handleClickedSignal(workspaceRoot, log) {
       target = {
         sessionId: signal.sessionId,
         pids: signal.pids,
+        shellPid: signal.shellPid || 0,
+        workspaceRoot: signal.workspaceRoot || '',
+        projectDir: signal.projectDir || '',
         event: signal.event,
         project: signal.project,
         aiTitle: signal.aiTitle || '',
@@ -305,7 +310,7 @@ async function handleClickedSignal(workspaceRoot, log) {
   const sessionTag = target.sessionId ? target.sessionId.slice(0, 8) : '?';
   const titleSuffix = target.aiTitle ? `, title="${target.aiTitle}"` : '';
   log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]${titleSuffix}`);
-  await focusMatchingTerminal(target.pids, log);
+  await focusMatchingTerminal(target, log);
   markResolved(workspaceRoot, target.sessionId);
 }
 
@@ -392,42 +397,53 @@ async function describeTerminal(terminal, index) {
   return `[${index}]"${terminal.name}"(pid=${pid})`;
 }
 
-async function focusMatchingTerminal(pids, log) {
-  const terminals = vscode.window.terminals;
-  const descriptions = await Promise.all(terminals.map((t, i) => describeTerminal(t, i)));
-  log.appendLine(`Open terminals (${terminals.length}): ${descriptions.join(', ')}`);
-
-  for (let i = 0; i < terminals.length; i++) {
-    const terminal = terminals[i];
-    try {
-      const termPid = await terminal.processId;
-      if (termPid && pids.includes(termPid)) {
-        log.appendLine(`PID match: ${await describeTerminal(terminal, i)}`);
-        await showTerminal(terminal, log);
-        return;
-      }
-    } catch (_) {}
-  }
-
-  for (let i = 0; i < terminals.length; i++) {
-    const terminal = terminals[i];
-    const name = terminal.name.toLowerCase();
-    if (name.includes('claude') || name.includes('node')) {
-      log.appendLine(`Name match: ${await describeTerminal(terminal, i)}`);
-      await showTerminal(terminal, log);
-      return;
+/**
+ * Build the normalized terminal descriptor consumed by lib/terminal-match.
+ * Resolves processId and the shell-integration cwd (if available).
+ */
+async function describeTerminalForMatch(terminal, index) {
+  let pid = null;
+  try {
+    const resolved = await terminal.processId;
+    if (resolved) pid = resolved;
+  } catch (_) {}
+  let cwd = null;
+  try {
+    // shellIntegration is undefined when the user hasn't enabled it or the
+    // shell has not handshaked yet. cwd may be a vscode.Uri or string.
+    const si = terminal.shellIntegration;
+    if (si && si.cwd) {
+      cwd = typeof si.cwd === 'string' ? si.cwd : (si.cwd.fsPath || String(si.cwd));
     }
-  }
+  } catch (_) {}
+  return { index, name: terminal.name || '', pid, cwd };
+}
 
-  if (terminals.length > 0) {
-    const lastIndex = terminals.length - 1;
-    const lastTerminal = terminals[lastIndex];
-    log.appendLine(`Fallback: last terminal ${await describeTerminal(lastTerminal, lastIndex)}`);
-    await showTerminal(lastTerminal, log);
+/**
+ * Pick a terminal and `show()` it. Uses lib/terminal-match's tiered
+ * strategy (PID → cwd → Claude title markers → single non-default name).
+ * If no tier matches, intentionally does nothing — the previous
+ * "last terminal" fallback opened arbitrary shells (PowerShell when Claude
+ * was in Git Bash) and was worse than no action.
+ */
+async function focusMatchingTerminal(signal, log) {
+  const terminals = vscode.window.terminals;
+  if (terminals.length === 0) {
+    log.appendLine('No terminals open to focus');
     return;
   }
+  const descs = await Promise.all(terminals.map((t, i) => describeTerminalForMatch(t, i)));
+  const pretty = descs.map(d => `[${d.index}]"${d.name}"(pid=${d.pid || '?'}${d.cwd ? `,cwd=${d.cwd}` : ''})`);
+  log.appendLine(`Open terminals (${terminals.length}): ${pretty.join(', ')}`);
 
-  log.appendLine('No terminals found to focus');
+  const m = matchTerminal(descs, signal);
+  if (!m) {
+    log.appendLine('No confident terminal match — leaving terminal focus alone (workspace opened, but no terminal switch).');
+    return;
+  }
+  const terminal = terminals[m.index];
+  log.appendLine(`Match tier=${m.tier} — ${m.reason} → ${pretty[m.index]}`);
+  await showTerminal(terminal, log);
 }
 
 async function showTerminal(terminal, log) {

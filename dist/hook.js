@@ -56,7 +56,11 @@ var require_signals = __commonJS({
               sessionId: typeof data.sessionId === "string" ? data.sessionId : "",
               project: data.project || "Unknown",
               projectDir: data.projectDir || "",
+              workspaceRoot: typeof data.workspaceRoot === "string" ? data.workspaceRoot : "",
               pids: Array.isArray(data.pids) ? data.pids : [],
+              pidNames: data.pidNames && typeof data.pidNames === "object" ? data.pidNames : {},
+              shellPid: Number.isInteger(data.shellPid) && data.shellPid > 0 ? data.shellPid : 0,
+              pidChainSource: typeof data.pidChainSource === "string" ? data.pidChainSource : "",
               state: data.state === "fired" ? "fired" : "pending",
               aiTitle: typeof data.aiTitle === "string" ? data.aiTitle : "",
               timestamp: data.timestamp || Date.now()
@@ -74,7 +78,11 @@ var require_signals = __commonJS({
         sessionId: "",
         project: "Claude Code",
         projectDir: "",
+        workspaceRoot: "",
         pids,
+        pidNames: {},
+        shellPid: 0,
+        pidChainSource: "",
         state: "pending",
         aiTitle: "",
         timestamp: Date.now()
@@ -272,16 +280,22 @@ var require_click_marker = __commonJS({
         event: data.event === "completed" ? "completed" : "waiting",
         project: typeof data.project === "string" ? data.project : "Unknown",
         pids: Array.isArray(data.pids) ? data.pids.filter((p) => Number.isInteger(p) && p > 0) : [],
+        shellPid: Number.isInteger(data.shellPid) && data.shellPid > 0 ? data.shellPid : 0,
+        workspaceRoot: typeof data.workspaceRoot === "string" ? data.workspaceRoot : "",
+        projectDir: typeof data.projectDir === "string" ? data.projectDir : "",
         aiTitle: typeof data.aiTitle === "string" ? data.aiTitle : "",
         timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now()
       };
     }
-    function buildClickMarkerPayload2({ sessionId, pids, event, project, aiTitle }) {
+    function buildClickMarkerPayload2({ sessionId, pids, shellPid, workspaceRoot, projectDir, event, project, aiTitle }) {
       return JSON.stringify({
         sessionId: sessionId || "",
         event: event === "completed" ? "completed" : "waiting",
         project: project || "Unknown",
         pids: Array.isArray(pids) ? pids : [],
+        shellPid: Number.isInteger(shellPid) && shellPid > 0 ? shellPid : 0,
+        workspaceRoot: workspaceRoot || "",
+        projectDir: projectDir || "",
         aiTitle: typeof aiTitle === "string" ? aiTitle : "",
         timestamp: Date.now()
       });
@@ -322,6 +336,158 @@ var require_transcript_title = __commonJS({
   }
 });
 
+// lib/process-tree.js
+var require_process_tree = __commonJS({
+  "lib/process-tree.js"(exports2, module2) {
+    var { execSync: execSync2 } = require("child_process");
+    var WALK_UP_LIMIT = 30;
+    function snapshot() {
+      if (process.platform === "win32") {
+        return snapshotWindows();
+      }
+      return snapshotPosix();
+    }
+    function snapshotWindows() {
+      try {
+        const ps = `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`;
+        const out = execSync2(`powershell -NoProfile -NonInteractive -Command "${ps}"`, {
+          encoding: "utf8",
+          timeout: 5e3,
+          maxBuffer: 16 * 1024 * 1024,
+          stdio: ["pipe", "pipe", "pipe"]
+        });
+        const procs = parsePowerShellJson(out);
+        if (procs.size > 0) return { procs, source: "powershell" };
+      } catch (_) {
+      }
+      try {
+        const out = execSync2(
+          `wmic process get ProcessId,ParentProcessId,Name /format:csv`,
+          { encoding: "utf8", timeout: 5e3, maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
+        );
+        const procs = parseWmicCsv(out);
+        if (procs.size > 0) return { procs, source: "wmic" };
+      } catch (_) {
+      }
+      return { procs: /* @__PURE__ */ new Map(), source: "failed" };
+    }
+    function snapshotPosix() {
+      try {
+        const out = execSync2("ps -A -o pid=,ppid=,comm=", {
+          encoding: "utf8",
+          timeout: 3e3,
+          maxBuffer: 8 * 1024 * 1024,
+          stdio: ["pipe", "pipe", "pipe"]
+        });
+        const procs = parsePsOutput(out);
+        if (procs.size > 0) return { procs, source: "ps" };
+      } catch (_) {
+      }
+      return { procs: /* @__PURE__ */ new Map(), source: "failed" };
+    }
+    function parsePowerShellJson(text) {
+      const procs = /* @__PURE__ */ new Map();
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {
+        return procs;
+      }
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      for (const row of list) {
+        if (!row || typeof row !== "object") continue;
+        const pid = toInt(row.ProcessId);
+        const ppid = toInt(row.ParentProcessId);
+        const name = typeof row.Name === "string" ? row.Name : "";
+        if (pid > 0) procs.set(pid, { pid, ppid, name });
+      }
+      return procs;
+    }
+    function parseWmicCsv(text) {
+      const procs = /* @__PURE__ */ new Map();
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (lines.length < 2) return procs;
+      const header = lines[0].split(",").map((s) => s.trim().toLowerCase());
+      const nameIdx = header.indexOf("name");
+      const pidIdx = header.indexOf("processid");
+      const ppidIdx = header.indexOf("parentprocessid");
+      if (pidIdx < 0 || ppidIdx < 0) return procs;
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        const pid = toInt(cols[pidIdx]);
+        const ppid = toInt(cols[ppidIdx]);
+        const name = nameIdx >= 0 ? (cols[nameIdx] || "").trim() : "";
+        if (pid > 0) procs.set(pid, { pid, ppid, name });
+      }
+      return procs;
+    }
+    function parsePsOutput(text) {
+      const procs = /* @__PURE__ */ new Map();
+      for (const line of text.split("\n")) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+        if (!m) continue;
+        const pid = toInt(m[1]);
+        const ppid = toInt(m[2]);
+        const name = m[3].trim();
+        if (pid > 0) procs.set(pid, { pid, ppid, name });
+      }
+      return procs;
+    }
+    function toInt(value) {
+      const n = parseInt(value, 10);
+      return Number.isFinite(n) ? n : 0;
+    }
+    function walkUp2(snapshotResult, pid, limit = WALK_UP_LIMIT) {
+      const { procs } = snapshotResult;
+      const chain = [];
+      const seen = /* @__PURE__ */ new Set();
+      let current = pid;
+      while (current && current > 0 && chain.length < limit) {
+        if (seen.has(current)) break;
+        seen.add(current);
+        const node = procs.get(current);
+        if (!node) {
+          chain.push({ pid: current, ppid: 0, name: "" });
+          break;
+        }
+        chain.push(node);
+        if (!node.ppid || node.ppid === current) break;
+        current = node.ppid;
+      }
+      return chain;
+    }
+    function walkDown(snapshotResult, rootPid) {
+      const { procs } = snapshotResult;
+      const childIndex = /* @__PURE__ */ new Map();
+      for (const node of procs.values()) {
+        if (!node.ppid) continue;
+        if (!childIndex.has(node.ppid)) childIndex.set(node.ppid, []);
+        childIndex.get(node.ppid).push(node.pid);
+      }
+      const result = /* @__PURE__ */ new Set();
+      const stack = [rootPid];
+      while (stack.length) {
+        const pid = stack.pop();
+        if (result.has(pid)) continue;
+        result.add(pid);
+        const children = childIndex.get(pid);
+        if (children) stack.push(...children);
+      }
+      return result;
+    }
+    module2.exports = {
+      snapshot,
+      walkUp: walkUp2,
+      walkDown,
+      // Exposed for tests:
+      parsePowerShellJson,
+      parseWmicCsv,
+      parsePsOutput,
+      WALK_UP_LIMIT
+    };
+  }
+});
+
 // hook.js
 var fs = require("fs");
 var path = require("path");
@@ -338,6 +504,29 @@ var {
 var { shouldNotify: checkShouldNotify } = require_stage_dedup();
 var { buildClickMarkerPayload } = require_click_marker();
 var { readAiTitle } = require_transcript_title();
+var { snapshot: processSnapshot, walkUp } = require_process_tree();
+var SHELL_PROCESS_NAMES = /* @__PURE__ */ new Set([
+  "bash.exe",
+  "sh.exe",
+  "zsh.exe",
+  "pwsh.exe",
+  "powershell.exe",
+  "cmd.exe",
+  "fish.exe",
+  "wsl.exe",
+  // POSIX (no .exe), as reported by `ps -o comm=`. Includes the
+  // login-shell '-' prefix variants.
+  "bash",
+  "-bash",
+  "sh",
+  "-sh",
+  "zsh",
+  "-zsh",
+  "pwsh",
+  "powershell",
+  "fish",
+  "-fish"
+]);
 var CONFIG_FILE = "claude-notifications-config.json";
 var DEFAULT_HANDSHAKE_MS = 1200;
 function shEsc(s) {
@@ -406,46 +595,31 @@ function xmlEsc(s) {
   if (!dedup.notify) {
     process.exit(0);
   }
-  function getPidChain() {
-    const pids2 = [];
-    let currentPid = process.pid;
-    if (process.platform === "win32") {
-      while (currentPid && currentPid > 0) {
-        pids2.push(currentPid);
-        try {
-          const output = execSync(
-            `wmic process where ProcessId=${currentPid} get ParentProcessId /value`,
-            { encoding: "utf8", timeout: 2e3, stdio: ["pipe", "pipe", "pipe"] }
-          );
-          const match = output.match(/ParentProcessId=(\d+)/);
-          if (!match) break;
-          const parentPid = parseInt(match[1], 10);
-          if (parentPid === currentPid || parentPid === 0) break;
-          currentPid = parentPid;
-        } catch (_) {
-          break;
-        }
-      }
-    } else {
-      while (currentPid && currentPid > 1) {
-        pids2.push(currentPid);
-        try {
-          const output = execSync(`ps -o ppid= -p ${currentPid}`, {
-            encoding: "utf8",
-            timeout: 2e3,
-            stdio: ["pipe", "pipe", "pipe"]
-          });
-          const parentPid = parseInt(output.trim(), 10);
-          if (isNaN(parentPid) || parentPid <= 0 || parentPid === currentPid) break;
-          currentPid = parentPid;
-        } catch (_) {
-          break;
-        }
-      }
-    }
-    return pids2;
+  const snap = processSnapshot();
+  const chain = walkUp(snap, process.pid);
+  const pids = chain.map((n) => n.pid);
+  const pidNames = {};
+  for (const node of chain) {
+    if (node.name) pidNames[String(node.pid)] = node.name;
   }
-  const pids = getPidChain();
+  let shellPid = 0;
+  for (const node of chain) {
+    if (!node.name) continue;
+    const base = node.name.toLowerCase().replace(/^.*[/\\]/, "").replace(/^-/, "");
+    if (SHELL_PROCESS_NAMES.has(base)) {
+      shellPid = node.pid;
+      break;
+    }
+  }
+  try {
+    const tip = chain.length > 0 ? chain[chain.length - 1] : null;
+    const tipDesc = tip ? `pid=${tip.pid} name=${tip.name || "?"}` : "empty-chain";
+    process.stderr.write(
+      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || "none"} tip=${tipDesc}
+`
+    );
+  } catch (_) {
+  }
   let shouldWriteSignal = true;
   try {
     const existing = JSON.parse(fs.readFileSync(signalPath, "utf8"));
@@ -465,6 +639,9 @@ function xmlEsc(s) {
       projectDir,
       workspaceRoot,
       pids,
+      pidNames,
+      shellPid: shellPid || void 0,
+      pidChainSource: snap.source,
       state: "pending",
       aiTitle,
       timestamp: Date.now()
@@ -560,6 +737,9 @@ function xmlEsc(s) {
       const clickPayload = buildClickMarkerPayload({
         sessionId,
         pids,
+        shellPid,
+        workspaceRoot,
+        projectDir,
         event: hookEvent,
         project: projectName,
         aiTitle

@@ -2,7 +2,7 @@
 
 > Project: **Claude Notifications** — VS Code extension (publisher `dimokol`, id `dimokol.claude-notifications`).
 > Repo name on disk: `claude-terminal-focus` (legacy directory name; do not rename, the publisher id is what users see).
-> Current version: **3.3.1**.
+> Current version: **3.4.0**.
 > User: solo maintainer, dev machine is macOS, target users are Claude Code users on macOS / Windows / Linux.
 
 This file is the entry point for any Claude / AI coding agent working in this repo. Read it before touching code or doing release work.
@@ -36,6 +36,8 @@ repo root
 │   ├── state-paths.js        # ~/.claude/focus-state/<sha1(workspace).slice(0,12)>/ path derivation.
 │   ├── stage-dedup.js        # Stage-ID state machine (shouldNotify, advanceOnPrompt, markResolved).
 │   ├── click-marker.js       # Parse/build the JSON payload terminal-notifier writes on click.
+│   ├── process-tree.js       # Cross-platform process snapshot + walkUp/walkDown. Replaces per-PID wmic/ps.
+│   ├── terminal-match.js     # Tiered terminal-matching (PID → cwd → Claude markers → non-default-name).
 │   ├── hooks-installer.js    # Read/write ~/.claude/settings.json hook entries.
 │   └── sounds.js             # Cross-platform sound playback.
 │
@@ -68,12 +70,14 @@ This location is **outside** any workspace's `.vscode/` directory and therefore 
 
 ```
 shouldNotify(workspaceRoot, sessionId, currentEvent):
-  - no sessionId            → notify (can't dedup safely)
-  - no entry for session    → create stage 1, notify
-  - lastEvent === null      → set lastEvent=current, notify (post-prompt fresh stage)
-  - resolved === true       → stageId++, lastEvent=current, resolved=false, notify
-  - else (unresolved stage) → update lastEvent=current, SUPPRESS
-                              (collapses Claude's Stop→Notification pair into one alert)
+  - no sessionId                            → notify (can't dedup safely)
+  - no entry for session                    → create stage 1, notify
+  - lastEvent === null                      → set lastEvent=current, notify (post-prompt fresh stage)
+  - resolved === true                       → stageId++, lastEvent=current, resolved=false, notify
+  - unresolved, now - lastNotifiedAt > 3s   → stageId++, lastEvent=current, resolved=false, notify
+                                              (escape valve — see below)
+  - else (unresolved, fresh burst)          → update lastEvent=current, SUPPRESS
+                                              (collapses Claude's Stop→Notification pair into one alert)
 
 advanceOnPrompt(workspaceRoot, sessionId):  # called by hook-user-prompt.js
   stageId++, lastEvent=null, resolved=false
@@ -82,6 +86,10 @@ markResolved(workspaceRoot, sessionId):     # called by extension on EXPLICIT us
   resolved=true
 ```
 
+**Escape valve (`STAGE_ESCAPE_VALVE_MS = 3000`):** Claude Code's `AskUserQuestion` tool does NOT fire `PreToolUse`/`PostToolUse` hooks (upstream issue [anthropics/claude-code#15872](https://github.com/anthropics/claude-code/issues/15872)). That means there's no signal we can hook to advance the stage when a user answers a multi-choice question — so a follow-up `Notification` from the next `AskUserQuestion` (or any other delayed wait in the same stage) used to land in an unresolved stage and get silently swallowed. The escape valve fixes that by letting a same-stage event through if it arrives more than 3s after the last notification. The Stop/Notification platform-duplicate burst fires within ~100–200ms so it stays collapsed; real new waits always come after at least one tool call, which takes longer.
+
+**Revert path when #15872 ships:** drop `STAGE_ESCAPE_VALVE_MS` and the escape branch in `shouldNotify`; install a fifth hook entry for `PostToolUse` (matcher: `AskUserQuestion`) pointing at a new `dist/hook-tool-complete.js`; that hook reads `session_id` from stdin and calls `advanceOnPrompt`. The state machine then becomes purely event-driven again with no timing assumption.
+
 **Important — what counts as an "ack" for `markResolved`:** Focus-Terminal toast click,
 OS-banner click. The "Already on correct terminal" sound-only path **does not** call
 `markResolved`; doing so would prematurely re-open the gate and let the immediate
@@ -89,6 +97,22 @@ follow-up event in the same stage (e.g. Notification right after Stop) re-fire a
 duplicate sound. v3.3.1 fixed exactly this regression.
 
 The unit tests in `test/stage-dedup.test.js` are the authoritative spec — if you change the state machine, update the tests and verify they still describe the intended behavior.
+
+### Terminal-matching tiers (`lib/terminal-match.js`)
+
+When the extension needs to pick *which* VS Code terminal a Claude signal belongs to (Case-A "are you already on the right terminal?" check, Focus-Terminal toast click, OS-banner click), it runs through these tiers in order. The first tier that matches **exactly one** terminal wins; ambiguous tiers (matching 0 or 2+) fall through.
+
+```
+1. pid               — terminal.processId is signal.shellPid OR appears in signal.pids
+2. cwd               — terminal.shellIntegration.cwd equals (or is under) signal.workspaceRoot / projectDir
+3. claude-marker     — terminal name contains ✳, ⚒, ▣, ✻, "claude", or the project basename (≥ 4 chars)
+4. non-default-name  — exactly one terminal has a name not in {bash, powershell, pwsh, cmd, zsh, sh, fish, ...}
+5. (none)            — return null. NO "last terminal" fallback — switching to a random shell is worse than not switching.
+```
+
+Why this exists: on Windows + Git Bash, `terminal.processId` returns a launcher PID that is *not* an ancestor of `node hook.js` (MSYS2 fork model / winpty / ConPTY indirection break the link), so the PID tier silently misses. The cwd and Claude-marker tiers are the recovery path — Claude Code writes its title via ANSI escapes (`✳` busy / `⚒` tool / project basename idle), so any terminal hosting Claude has a distinctive name we can match against.
+
+The PID chain is built in `hook.js#getPidChain` from a single `lib/process-tree.snapshot()` call (one `Get-CimInstance` on Windows, one `ps -A` on POSIX) rather than per-PID subprocesses. The hook also writes a short diagnostic line to stderr — Claude Code captures hook stderr to its hook log, so future "wrong terminal" reports give us `chain depth=… source=… shellPid=… tip=…` without instrumentation.
 
 ### Notification ownership invariant
 
