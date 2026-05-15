@@ -29,6 +29,20 @@ const {
 } = require('./lib/state-paths');
 const { shouldNotify: checkShouldNotify } = require('./lib/stage-dedup');
 const { buildClickMarkerPayload } = require('./lib/click-marker');
+const { readAiTitle } = require('./lib/transcript-title');
+const { snapshot: processSnapshot, walkUp } = require('./lib/process-tree');
+
+// Process names we consider "the interactive shell hosting Claude". The
+// first ancestor matching one of these is recorded as signal.shellPid —
+// the extension prefers it over the raw pid list when matching terminals.
+const SHELL_PROCESS_NAMES = new Set([
+  'bash.exe', 'sh.exe', 'zsh.exe', 'pwsh.exe', 'powershell.exe',
+  'cmd.exe', 'fish.exe', 'wsl.exe',
+  // POSIX (no .exe), as reported by `ps -o comm=`. Includes the
+  // login-shell '-' prefix variants.
+  'bash', '-bash', 'sh', '-sh', 'zsh', '-zsh', 'pwsh', 'powershell',
+  'fish', '-fish'
+]);
 
 const CONFIG_FILE = 'claude-notifications-config.json';
 const DEFAULT_HANDSHAKE_MS = 1200;
@@ -36,6 +50,15 @@ const DEFAULT_HANDSHAKE_MS = 1200;
 // Shell-escape a single argument (POSIX single-quote style).
 function shEsc(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function xmlEsc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 (async () => {
@@ -48,16 +71,29 @@ function shEsc(s) {
   let hookEventName = '';
   let hookMessage = '';
   let sessionId = '';
+  let transcriptPath = '';
   try {
     const stdinData = fs.readFileSync(0, 'utf8');
     const input = JSON.parse(stdinData);
     hookEventName = input.hook_event_name || '';
     hookMessage = typeof input.message === 'string' ? input.message : '';
     sessionId = input.session_id || '';
+    transcriptPath = typeof input.transcript_path === 'string' ? input.transcript_path : '';
     const eventName = hookEventName.toLowerCase();
     if (eventName === 'stop') hookEvent = 'completed';
     else hookEvent = 'waiting'; // notification, permissionrequest, etc.
   } catch (_) {}
+
+  // aiTitle: best-effort. Missing transcript / no ai-title record / parse
+  // error → '', and we fall back to project-only notification text.
+  const MAX_TITLE_LEN = 60; // macOS subtitle truncates around here; keep banners readable.
+  let aiTitle = '';
+  if (transcriptPath) {
+    const raw = readAiTitle(transcriptPath);
+    if (raw) {
+      aiTitle = raw.length > MAX_TITLE_LEN ? raw.slice(0, MAX_TITLE_LEN - 1) + '…' : raw;
+    }
+  }
 
   // --- 2. Read config (mute state, sound/event preferences) ---
 
@@ -109,48 +145,55 @@ function shEsc(s) {
   }
 
   // --- 4. Build PID ancestor chain ---
+  //
+  // One process-tree snapshot, then a pure JS walk up from process.pid.
+  // Previously we ran one `wmic`/`ps` subprocess per ancestor; on Windows
+  // that was slow, silently broke (catch + break with no logging), and
+  // `wmic` is being removed from modern Windows installs entirely.
+  //
+  // The walk also records process *names* so the extension can identify
+  // which pid is the actual shell (bash.exe / pwsh.exe / cmd.exe / ...).
+  // That's how we match terminals reliably for Git Bash, where
+  // `terminal.processId` from VS Code is not in the ancestor chain
+  // (MSYS2 fork model / launcher exits after spawning the real shell).
 
-  function getPidChain() {
-    const pids = [];
-    let currentPid = process.pid;
-
-    if (process.platform === 'win32') {
-      while (currentPid && currentPid > 0) {
-        pids.push(currentPid);
-        try {
-          const output = execSync(
-            `wmic process where ProcessId=${currentPid} get ParentProcessId /value`,
-            { encoding: 'utf8', timeout: 2000, stdio: ['pipe', 'pipe', 'pipe'] }
-          );
-          const match = output.match(/ParentProcessId=(\d+)/);
-          if (!match) break;
-          const parentPid = parseInt(match[1], 10);
-          if (parentPid === currentPid || parentPid === 0) break;
-          currentPid = parentPid;
-        } catch (_) { break; }
-      }
-    } else {
-      while (currentPid && currentPid > 1) {
-        pids.push(currentPid);
-        try {
-          const output = execSync(`ps -o ppid= -p ${currentPid}`, {
-            encoding: 'utf8', timeout: 2000, stdio: ['pipe', 'pipe', 'pipe']
-          });
-          const parentPid = parseInt(output.trim(), 10);
-          if (isNaN(parentPid) || parentPid <= 0 || parentPid === currentPid) break;
-          currentPid = parentPid;
-        } catch (_) { break; }
-      }
-    }
-    return pids;
+  const snap = processSnapshot();
+  const chain = walkUp(snap, process.pid);
+  const pids = chain.map(n => n.pid);
+  const pidNames = {};
+  for (const node of chain) {
+    if (node.name) pidNames[String(node.pid)] = node.name;
   }
+  // First ancestor whose process name looks like an interactive shell.
+  // This is what the extension uses for primary terminal matching.
+  // Names may arrive as a full path (POSIX `ps -o comm=` on macOS returns
+  // '/bin/zsh') or as a bare executable (Windows: 'bash.exe'), so we
+  // normalize to a lowercase basename before checking.
+  let shellPid = 0;
+  for (const node of chain) {
+    if (!node.name) continue;
+    const base = node.name.toLowerCase().replace(/^.*[/\\]/, '').replace(/^-/, '');
+    if (SHELL_PROCESS_NAMES.has(base)) {
+      shellPid = node.pid;
+      break;
+    }
+  }
+
+  // Diagnostics — Claude Code captures hook stderr to its hook log.
+  // One line, terse, parseable. Surfaces when snapshot acquisition fails
+  // (the most common cause of future Windows reports).
+  try {
+    const tip = chain.length > 0 ? chain[chain.length - 1] : null;
+    const tipDesc = tip ? `pid=${tip.pid} name=${tip.name || '?'}` : 'empty-chain';
+    process.stderr.write(
+      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || 'none'} tip=${tipDesc}\n`
+    );
+  } catch (_) {}
 
   // --- 5. Write signal file ---
   // If another hook (for a concurrent event) already wrote a signal with a
   // higher-priority event, preserve it. This makes "waiting" (user action
   // required) win over "completed" (just-finished) when both fire together.
-
-  const pids = getPidChain();
   let shouldWriteSignal = true;
   try {
     const existing = JSON.parse(fs.readFileSync(signalPath, 'utf8'));
@@ -174,7 +217,11 @@ function shEsc(s) {
       projectDir: projectDir,
       workspaceRoot: workspaceRoot,
       pids,
+      pidNames,
+      shellPid: shellPid || undefined,
+      pidChainSource: snap.source,
       state: 'pending',
+      aiTitle,
       timestamp: Date.now()
     };
     fs.writeFileSync(signalPath, JSON.stringify(signalPayload, null, 2));
@@ -302,19 +349,27 @@ function shEsc(s) {
       // multi-session workspaces focus whichever session wrote the signal
       // file last instead of the one whose banner the user actually clicked.
       const clickPayload = buildClickMarkerPayload({
-        sessionId, pids, event: hookEvent, project: projectName
+        sessionId, pids, shellPid, workspaceRoot, projectDir,
+        event: hookEvent, project: projectName, aiTitle
       });
       const executeCmd = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
-      const child = spawn('terminal-notifier', [
+      const notifierArgs = [
         '-title', eventInfo.title,
         '-message', eventInfo.message,
         '-execute', executeCmd,
         '-group', `claude-${projectName}`,
-      ], { detached: true, stdio: 'ignore' });
+      ];
+      if (aiTitle) {
+        notifierArgs.splice(2, 0, '-subtitle', aiTitle);
+      }
+      const child = spawn('terminal-notifier', notifierArgs, { detached: true, stdio: 'ignore' });
       child.unref();
     } catch (_) {
       try {
-        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${eventInfo.title}"'`, {
+        const osaTitle = aiTitle
+          ? `${eventInfo.title} — ${aiTitle.replace(/"/g, '\\"')}`
+          : eventInfo.title;
+        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${osaTitle}"'`, {
           timeout: 3000, stdio: 'ignore'
         });
       } catch (_) {}
@@ -342,14 +397,16 @@ function shEsc(s) {
     const vscodePath = workspaceRoot.replace(/\\/g, '/');
     const vscodeUri = `vscode://file/${vscodePath}`;
     const tmpScript = path.join(os.tmpdir(), `claude-notif-${Date.now()}-${process.pid}.ps1`);
+    const titleLine = aiTitle ? `    <text>${xmlEsc(aiTitle)}</text>` : '';
     const psScriptBody = `
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $template = @"
 <toast activationType="protocol" launch="${vscodeUri}" duration="long">
   <visual><binding template="ToastGeneric">
-    <text>${eventInfo.title}</text>
-    <text>${eventInfo.message}</text>
+    <text>${xmlEsc(eventInfo.title)}</text>
+${titleLine}
+    <text>${xmlEsc(eventInfo.message)}</text>
   </binding></visual>
   <audio src="ms-winsoundevent:Notification.Default" silent="true" />
 </toast>

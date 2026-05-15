@@ -3,7 +3,14 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { shouldNotify, advanceOnPrompt, markResolved, _readSessions } = require('../lib/stage-dedup');
+const { shouldNotify, advanceOnPrompt, markResolved, _readSessions, STAGE_ESCAPE_VALVE_MS } = require('../lib/stage-dedup');
+const { stateDir } = require('./helpers');
+
+function backdateLastNotified(root, sessionId, msAgo) {
+  const map = _readSessions(root);
+  map[sessionId].lastNotifiedAt = Date.now() - msAgo;
+  fs.writeFileSync(path.join(stateDir(root), 'sessions'), JSON.stringify(map));
+}
 
 let tmpRoot;
 function tmpWorkspace() {
@@ -104,6 +111,31 @@ test('different sessions do not interfere', () => {
   const b = shouldNotify(root, 'b', 'completed');
   assert.strictEqual(b.notify, true);
   assert.strictEqual(b.stageId, 1);
+});
+
+test('escape valve: same-stage event within window stays suppressed', () => {
+  const root = tmpWorkspace();
+  shouldNotify(root, 'sess-a', 'completed');
+  // Simulate the next event arriving well inside the burst window.
+  backdateLastNotified(root, 'sess-a', 200);
+  const res = shouldNotify(root, 'sess-a', 'waiting');
+  assert.strictEqual(res.notify, false, 'fresh-burst dupe must still be suppressed');
+  const entry = _readSessions(root)['sess-a'];
+  assert.strictEqual(entry.stageId, 1, 'stage must not advance inside the burst window');
+});
+
+test('escape valve: same-stage event after window notifies and bumps stage', () => {
+  // Models the AskUserQuestion case: an unresolved stage receives a new
+  // Notification event seconds after the last one, with no upstream ack.
+  const root = tmpWorkspace();
+  shouldNotify(root, 'sess-a', 'completed');
+  backdateLastNotified(root, 'sess-a', STAGE_ESCAPE_VALVE_MS + 500);
+  const res = shouldNotify(root, 'sess-a', 'waiting');
+  assert.strictEqual(res.notify, true, 'delayed same-stage event must fire');
+  assert.strictEqual(res.stageId, 2, 'escape valve must bump stageId so click payload tracks the new wait');
+  const entry = _readSessions(root)['sess-a'];
+  assert.strictEqual(entry.lastEvent, 'waiting');
+  assert.strictEqual(entry.resolved, false);
 });
 
 test('missing session_id treats as unique per call', () => {

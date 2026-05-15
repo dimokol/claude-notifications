@@ -59,6 +59,7 @@ var require_stage_dedup = __commonJS({
     var path2 = require("path");
     var { getStateDir: getStateDir2, getSessionsPath } = require_state_paths();
     var SESSIONS_PRUNE_MS = 60 * 60 * 1e3;
+    var STAGE_ESCAPE_VALVE_MS = 3e3;
     function ensureDir(workspaceRoot) {
       const dir = getStateDir2(workspaceRoot);
       fs2.mkdirSync(dir, { recursive: true });
@@ -113,6 +114,16 @@ var require_stage_dedup = __commonJS({
         writeSessions(workspaceRoot, map);
         return { notify: true, stageId: entry.stageId };
       }
+      const lastAt = entry.lastNotifiedAt || 0;
+      if (now - lastAt > STAGE_ESCAPE_VALVE_MS) {
+        entry.stageId = (entry.stageId || 0) + 1;
+        entry.lastEvent = currentEvent;
+        entry.resolved = false;
+        entry.lastNotifiedAt = now;
+        entry.updatedAt = now;
+        writeSessions(workspaceRoot, map);
+        return { notify: true, stageId: entry.stageId };
+      }
       entry.lastEvent = currentEvent;
       entry.updatedAt = now;
       writeSessions(workspaceRoot, map);
@@ -141,6 +152,7 @@ var require_stage_dedup = __commonJS({
     }
     module2.exports = {
       SESSIONS_PRUNE_MS,
+      STAGE_ESCAPE_VALVE_MS,
       shouldNotify,
       advanceOnPrompt: advanceOnPrompt2,
       markResolved,
