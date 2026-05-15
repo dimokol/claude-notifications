@@ -29,6 +29,7 @@ const {
 } = require('./lib/state-paths');
 const { shouldNotify: checkShouldNotify } = require('./lib/stage-dedup');
 const { buildClickMarkerPayload } = require('./lib/click-marker');
+const { readAiTitle } = require('./lib/transcript-title');
 
 const CONFIG_FILE = 'claude-notifications-config.json';
 const DEFAULT_HANDSHAKE_MS = 1200;
@@ -36,6 +37,15 @@ const DEFAULT_HANDSHAKE_MS = 1200;
 // Shell-escape a single argument (POSIX single-quote style).
 function shEsc(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function xmlEsc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 (async () => {
@@ -48,16 +58,29 @@ function shEsc(s) {
   let hookEventName = '';
   let hookMessage = '';
   let sessionId = '';
+  let transcriptPath = '';
   try {
     const stdinData = fs.readFileSync(0, 'utf8');
     const input = JSON.parse(stdinData);
     hookEventName = input.hook_event_name || '';
     hookMessage = typeof input.message === 'string' ? input.message : '';
     sessionId = input.session_id || '';
+    transcriptPath = typeof input.transcript_path === 'string' ? input.transcript_path : '';
     const eventName = hookEventName.toLowerCase();
     if (eventName === 'stop') hookEvent = 'completed';
     else hookEvent = 'waiting'; // notification, permissionrequest, etc.
   } catch (_) {}
+
+  // aiTitle: best-effort. Missing transcript / no ai-title record / parse
+  // error → '', and we fall back to project-only notification text.
+  const MAX_TITLE_LEN = 60; // macOS subtitle truncates around here; keep banners readable.
+  let aiTitle = '';
+  if (transcriptPath) {
+    const raw = readAiTitle(transcriptPath);
+    if (raw) {
+      aiTitle = raw.length > MAX_TITLE_LEN ? raw.slice(0, MAX_TITLE_LEN - 1) + '…' : raw;
+    }
+  }
 
   // --- 2. Read config (mute state, sound/event preferences) ---
 
@@ -175,6 +198,7 @@ function shEsc(s) {
       workspaceRoot: workspaceRoot,
       pids,
       state: 'pending',
+      aiTitle,
       timestamp: Date.now()
     };
     fs.writeFileSync(signalPath, JSON.stringify(signalPayload, null, 2));
@@ -302,19 +326,26 @@ function shEsc(s) {
       // multi-session workspaces focus whichever session wrote the signal
       // file last instead of the one whose banner the user actually clicked.
       const clickPayload = buildClickMarkerPayload({
-        sessionId, pids, event: hookEvent, project: projectName
+        sessionId, pids, event: hookEvent, project: projectName, aiTitle
       });
       const executeCmd = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
-      const child = spawn('terminal-notifier', [
+      const notifierArgs = [
         '-title', eventInfo.title,
         '-message', eventInfo.message,
         '-execute', executeCmd,
         '-group', `claude-${projectName}`,
-      ], { detached: true, stdio: 'ignore' });
+      ];
+      if (aiTitle) {
+        notifierArgs.splice(2, 0, '-subtitle', aiTitle);
+      }
+      const child = spawn('terminal-notifier', notifierArgs, { detached: true, stdio: 'ignore' });
       child.unref();
     } catch (_) {
       try {
-        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${eventInfo.title}"'`, {
+        const osaTitle = aiTitle
+          ? `${eventInfo.title} — ${aiTitle.replace(/"/g, '\\"')}`
+          : eventInfo.title;
+        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${osaTitle}"'`, {
           timeout: 3000, stdio: 'ignore'
         });
       } catch (_) {}
@@ -342,14 +373,16 @@ function shEsc(s) {
     const vscodePath = workspaceRoot.replace(/\\/g, '/');
     const vscodeUri = `vscode://file/${vscodePath}`;
     const tmpScript = path.join(os.tmpdir(), `claude-notif-${Date.now()}-${process.pid}.ps1`);
+    const titleLine = aiTitle ? `    <text>${xmlEsc(aiTitle)}</text>` : '';
     const psScriptBody = `
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $template = @"
 <toast activationType="protocol" launch="${vscodeUri}" duration="long">
   <visual><binding template="ToastGeneric">
-    <text>${eventInfo.title}</text>
-    <text>${eventInfo.message}</text>
+    <text>${xmlEsc(eventInfo.title)}</text>
+${titleLine}
+    <text>${xmlEsc(eventInfo.message)}</text>
   </binding></visual>
   <audio src="ms-winsoundevent:Notification.Default" silent="true" />
 </toast>

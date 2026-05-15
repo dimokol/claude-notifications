@@ -58,6 +58,7 @@ var require_signals = __commonJS({
               projectDir: data.projectDir || "",
               pids: Array.isArray(data.pids) ? data.pids : [],
               state: data.state === "fired" ? "fired" : "pending",
+              aiTitle: typeof data.aiTitle === "string" ? data.aiTitle : "",
               timestamp: data.timestamp || Date.now()
             };
           }
@@ -75,6 +76,7 @@ var require_signals = __commonJS({
         projectDir: "",
         pids,
         state: "pending",
+        aiTitle: "",
         timestamp: Date.now()
       };
     }
@@ -145,6 +147,7 @@ var require_stage_dedup = __commonJS({
     var path2 = require("path");
     var { getStateDir: getStateDir2, getSessionsPath } = require_state_paths();
     var SESSIONS_PRUNE_MS = 60 * 60 * 1e3;
+    var STAGE_ESCAPE_VALVE_MS = 3e3;
     function ensureDir(workspaceRoot) {
       const dir = getStateDir2(workspaceRoot);
       fs2.mkdirSync(dir, { recursive: true });
@@ -199,6 +202,16 @@ var require_stage_dedup = __commonJS({
         writeSessions(workspaceRoot, map);
         return { notify: true, stageId: entry.stageId };
       }
+      const lastAt = entry.lastNotifiedAt || 0;
+      if (now - lastAt > STAGE_ESCAPE_VALVE_MS) {
+        entry.stageId = (entry.stageId || 0) + 1;
+        entry.lastEvent = currentEvent;
+        entry.resolved = false;
+        entry.lastNotifiedAt = now;
+        entry.updatedAt = now;
+        writeSessions(workspaceRoot, map);
+        return { notify: true, stageId: entry.stageId };
+      }
       entry.lastEvent = currentEvent;
       entry.updatedAt = now;
       writeSessions(workspaceRoot, map);
@@ -227,6 +240,7 @@ var require_stage_dedup = __commonJS({
     }
     module2.exports = {
       SESSIONS_PRUNE_MS,
+      STAGE_ESCAPE_VALVE_MS,
       shouldNotify,
       advanceOnPrompt,
       markResolved,
@@ -258,19 +272,53 @@ var require_click_marker = __commonJS({
         event: data.event === "completed" ? "completed" : "waiting",
         project: typeof data.project === "string" ? data.project : "Unknown",
         pids: Array.isArray(data.pids) ? data.pids.filter((p) => Number.isInteger(p) && p > 0) : [],
+        aiTitle: typeof data.aiTitle === "string" ? data.aiTitle : "",
         timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now()
       };
     }
-    function buildClickMarkerPayload2({ sessionId, pids, event, project }) {
+    function buildClickMarkerPayload2({ sessionId, pids, event, project, aiTitle }) {
       return JSON.stringify({
         sessionId: sessionId || "",
         event: event === "completed" ? "completed" : "waiting",
         project: project || "Unknown",
         pids: Array.isArray(pids) ? pids : [],
+        aiTitle: typeof aiTitle === "string" ? aiTitle : "",
         timestamp: Date.now()
       });
     }
     module2.exports = { parseClickMarker, buildClickMarkerPayload: buildClickMarkerPayload2, CLICK_MARKER_STALE_MS };
+  }
+});
+
+// lib/transcript-title.js
+var require_transcript_title = __commonJS({
+  "lib/transcript-title.js"(exports2, module2) {
+    var fs2 = require("fs");
+    function readAiTitle2(transcriptPath) {
+      if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
+      let content;
+      try {
+        content = fs2.readFileSync(transcriptPath, "utf8");
+      } catch (_) {
+        return null;
+      }
+      if (!content) return null;
+      const lines = content.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        if (line.indexOf('"ai-title"') === -1) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj && obj.type === "ai-title" && typeof obj.aiTitle === "string" && obj.aiTitle.trim() !== "") {
+            return obj.aiTitle.trim();
+          }
+        } catch (_) {
+        }
+      }
+      return null;
+    }
+    module2.exports = { readAiTitle: readAiTitle2 };
   }
 });
 
@@ -289,10 +337,14 @@ var {
 } = require_state_paths();
 var { shouldNotify: checkShouldNotify } = require_stage_dedup();
 var { buildClickMarkerPayload } = require_click_marker();
+var { readAiTitle } = require_transcript_title();
 var CONFIG_FILE = "claude-notifications-config.json";
 var DEFAULT_HANDSHAKE_MS = 1200;
 function shEsc(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+function xmlEsc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 (async () => {
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -301,16 +353,26 @@ function shEsc(s) {
   let hookEventName = "";
   let hookMessage = "";
   let sessionId = "";
+  let transcriptPath = "";
   try {
     const stdinData = fs.readFileSync(0, "utf8");
     const input = JSON.parse(stdinData);
     hookEventName = input.hook_event_name || "";
     hookMessage = typeof input.message === "string" ? input.message : "";
     sessionId = input.session_id || "";
+    transcriptPath = typeof input.transcript_path === "string" ? input.transcript_path : "";
     const eventName = hookEventName.toLowerCase();
     if (eventName === "stop") hookEvent = "completed";
     else hookEvent = "waiting";
   } catch (_) {
+  }
+  const MAX_TITLE_LEN = 60;
+  let aiTitle = "";
+  if (transcriptPath) {
+    const raw = readAiTitle(transcriptPath);
+    if (raw) {
+      aiTitle = raw.length > MAX_TITLE_LEN ? raw.slice(0, MAX_TITLE_LEN - 1) + "\u2026" : raw;
+    }
   }
   const configPath = path.join(os.homedir(), ".claude", CONFIG_FILE);
   let config = { muted: false, soundEnabled: true, volume: 0.5 };
@@ -404,6 +466,7 @@ function shEsc(s) {
       workspaceRoot,
       pids,
       state: "pending",
+      aiTitle,
       timestamp: Date.now()
     };
     fs.writeFileSync(signalPath, JSON.stringify(signalPayload, null, 2));
@@ -498,10 +561,11 @@ function shEsc(s) {
         sessionId,
         pids,
         event: hookEvent,
-        project: projectName
+        project: projectName,
+        aiTitle
       });
       const executeCmd = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedPath)} && ${shEsc(codeCli)} ${shEsc(workspaceRoot)}`;
-      const child = spawn("terminal-notifier", [
+      const notifierArgs = [
         "-title",
         eventInfo.title,
         "-message",
@@ -510,11 +574,16 @@ function shEsc(s) {
         executeCmd,
         "-group",
         `claude-${projectName}`
-      ], { detached: true, stdio: "ignore" });
+      ];
+      if (aiTitle) {
+        notifierArgs.splice(2, 0, "-subtitle", aiTitle);
+      }
+      const child = spawn("terminal-notifier", notifierArgs, { detached: true, stdio: "ignore" });
       child.unref();
     } catch (_) {
       try {
-        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${eventInfo.title}"'`, {
+        const osaTitle = aiTitle ? `${eventInfo.title} \u2014 ${aiTitle.replace(/"/g, '\\"')}` : eventInfo.title;
+        execSync(`osascript -e 'display notification "${eventInfo.message}" with title "${osaTitle}"'`, {
           timeout: 3e3,
           stdio: "ignore"
         });
@@ -525,14 +594,16 @@ function shEsc(s) {
     const vscodePath = workspaceRoot.replace(/\\/g, "/");
     const vscodeUri = `vscode://file/${vscodePath}`;
     const tmpScript = path.join(os.tmpdir(), `claude-notif-${Date.now()}-${process.pid}.ps1`);
+    const titleLine = aiTitle ? `    <text>${xmlEsc(aiTitle)}</text>` : "";
     const psScriptBody = `
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $template = @"
 <toast activationType="protocol" launch="${vscodeUri}" duration="long">
   <visual><binding template="ToastGeneric">
-    <text>${eventInfo.title}</text>
-    <text>${eventInfo.message}</text>
+    <text>${xmlEsc(eventInfo.title)}</text>
+${titleLine}
+    <text>${xmlEsc(eventInfo.message)}</text>
   </binding></visual>
   <audio src="ms-winsoundevent:Notification.Default" silent="true" />
 </toast>
