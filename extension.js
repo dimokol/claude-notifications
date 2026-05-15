@@ -26,6 +26,7 @@ const {
 } = require('./lib/state-paths');
 const { markResolved } = require('./lib/stage-dedup');
 const { parseClickMarker } = require('./lib/click-marker');
+const { matchTerminal } = require('./lib/terminal-match');
 const { checkHookStatus, checkAllProfiles, installHooks, uninstallHooks } = require('./lib/hooks-installer');
 const { playSound, playSoundFile, resolveSoundPath, discoverSystemSounds } = require('./lib/sounds');
 
@@ -162,6 +163,7 @@ async function handleSignal(signalPath, workspaceRoot, log) {
   const rawEvent = signal.hookEventName || '?';
   const sessionTag = signal.sessionId ? signal.sessionId.slice(0, 8) : '?';
   log.appendLine(`Signal: event=${signal.event}(${rawEvent}), session=${sessionTag}, project=${signal.project}, pids=[${signal.pids.join(',')}], version=${signal.version}`);
+  if (signal.aiTitle) log.appendLine(`  title: ${signal.aiTitle}`);
   if (signal.hookMessage) log.appendLine(`  message: ${signal.hookMessage}`);
 
   const config = readConfig();
@@ -228,12 +230,11 @@ async function handleSignal(signalPath, workspaceRoot, log) {
   if (wantSound) playEventSound(signal.event, config);
 
   if (wantToast) {
-    const action = await vscode.window.showInformationMessage(
-      signal.event === 'completed'
-        ? `Task completed in: ${signal.project}`
-        : `Waiting for your response in: ${signal.project}`,
-      'Focus Terminal'
-    );
+    const baseMsg = signal.event === 'completed'
+      ? `Task completed in: ${signal.project}`
+      : `Waiting for your response in: ${signal.project}`;
+    const msg = signal.aiTitle ? `${baseMsg} — ${signal.aiTitle}` : baseMsg;
+    const action = await vscode.window.showInformationMessage(msg, 'Focus Terminal');
 
     if (action === 'Focus Terminal') {
       log.appendLine('User clicked Focus Terminal');
@@ -285,6 +286,7 @@ async function handleClickedSignal(workspaceRoot, log) {
         pids: signal.pids,
         event: signal.event,
         project: signal.project,
+        aiTitle: signal.aiTitle || '',
         source: 'signal-fallback'
       };
     }
@@ -301,7 +303,8 @@ async function handleClickedSignal(workspaceRoot, log) {
   }
 
   const sessionTag = target.sessionId ? target.sessionId.slice(0, 8) : '?';
-  log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]`);
+  const titleSuffix = target.aiTitle ? `, title="${target.aiTitle}"` : '';
+  log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]${titleSuffix}`);
   await focusMatchingTerminal(target.pids, log);
   markResolved(workspaceRoot, target.sessionId);
 }
