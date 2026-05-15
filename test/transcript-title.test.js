@@ -42,3 +42,66 @@ test('readAiTitle returns null when no ai-title records present', () => {
     fs.unlinkSync(p);
   }
 });
+
+test('readAiTitle returns the single ai-title when one is present', () => {
+  const p = tmpFile(
+    '{"type":"user","message":"hi"}\n' +
+    '{"type":"ai-title","aiTitle":"Fix flaky test","sessionId":"abc"}\n' +
+    '{"type":"assistant","message":"ok"}\n'
+  );
+  try {
+    assert.strictEqual(readAiTitle(p), 'Fix flaky test');
+  } finally {
+    fs.unlinkSync(p);
+  }
+});
+
+test('readAiTitle returns the LAST ai-title when multiple are present', () => {
+  const p = tmpFile(
+    '{"type":"ai-title","aiTitle":"First guess","sessionId":"abc"}\n' +
+    '{"type":"user","message":"actually..."}\n' +
+    '{"type":"ai-title","aiTitle":"Revised name","sessionId":"abc"}\n' +
+    '{"type":"assistant","message":"got it"}\n'
+  );
+  try {
+    assert.strictEqual(readAiTitle(p), 'Revised name');
+  } finally {
+    fs.unlinkSync(p);
+  }
+});
+
+test('readAiTitle skips malformed JSON lines and returns the nearest valid title', () => {
+  const p = tmpFile(
+    '{"type":"ai-title","aiTitle":"Valid older title","sessionId":"abc"}\n' +
+    '{"type":"ai-title","aiTitle":"newer but broken\n' +
+    '{"type":"assistant","message":"ok"}\n'
+  );
+  try {
+    assert.strictEqual(readAiTitle(p), 'Valid older title');
+  } finally {
+    fs.unlinkSync(p);
+  }
+});
+
+test('readAiTitle ignores ai-title records with empty or whitespace aiTitle', () => {
+  const p = tmpFile(
+    '{"type":"ai-title","aiTitle":"Real title","sessionId":"abc"}\n' +
+    '{"type":"ai-title","aiTitle":"   ","sessionId":"abc"}\n'
+  );
+  try {
+    assert.strictEqual(readAiTitle(p), 'Real title');
+  } finally {
+    fs.unlinkSync(p);
+  }
+});
+
+test('readAiTitle trims surrounding whitespace from the returned title', () => {
+  const p = tmpFile(
+    '{"type":"ai-title","aiTitle":"  Trim me  ","sessionId":"abc"}\n'
+  );
+  try {
+    assert.strictEqual(readAiTitle(p), 'Trim me');
+  } finally {
+    fs.unlinkSync(p);
+  }
+});
