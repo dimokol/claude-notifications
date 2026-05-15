@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Session title in notifications and logs.** Notifications and the "Claude Notifications" Output channel now include Claude Code's auto-generated session title (the `aiTitle` record from the transcript), so banners and toasts read like `Task completed in: my-project — Refactor the auth middleware` instead of just the project name. Resolved from `transcript_path` on each hook fire via a tail-scan for the most recent `ai-title` record; falls back to project-only text when the transcript is missing, malformed, or has no `ai-title` entries. Truncated to 60 chars to fit the macOS subtitle width.
+
+### Fixed
+- **`AskUserQuestion` multi-choice prompts no longer get silently swallowed by stage dedup.** When Claude Code asked a follow-up multi-choice question seconds after a prior `Stop`/`Notification` event in the same stage, the dedup state machine treated it as a fresh-burst duplicate and suppressed it — the user got no sound, no banner, no in-window toast. Root cause: `AskUserQuestion` does not fire `PreToolUse`/`PostToolUse` hooks (upstream [anthropics/claude-code#15872](https://github.com/anthropics/claude-code/issues/15872)), so the extension never sees the user's answer and the stage stays unresolved across multiple genuinely-distinct waits. `lib/stage-dedup.js#shouldNotify` now applies a 3-second escape valve: an event arriving in the same unresolved stage but more than `STAGE_ESCAPE_VALVE_MS` after `lastNotifiedAt` is treated as a new stage and notifies. The Stop/Notification platform-duplicate burst fires within ~100–200ms so it still collapses to a single alert. When #15872 ships, revert this and wire a `PostToolUse` hook that calls `advanceOnPrompt` on `AskUserQuestion` completion — see `CLAUDE.md` for the revert plan.
+
 ## [3.3.2] - 2026-05-08
 
 ### Fixed
