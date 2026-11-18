@@ -13,6 +13,16 @@ function pathExistsSync(p) {
     return false;
   }
 }
+var SKIP_VARS = ["CLAUDE_NOTIFICATIONS_SKIP", "OCTOSHELL_AGENT"];
+function shouldSkipForHost(env) {
+  const e = env || process.env;
+  for (const name of SKIP_VARS) {
+    const raw = e[name];
+    if (typeof raw !== "string") continue;
+    if (["1", "true", "yes", "on"].includes(raw.trim().toLowerCase())) return true;
+  }
+  return false;
+}
 function discoverProfiles(home) {
   const result = [];
   let entries;
@@ -176,6 +186,7 @@ function findNewestExtensionHook(recordedPath, isUserPrompt, fsLike = fs) {
   }
 }
 function main() {
+  if (shouldSkipForHost(process.env)) process.exit(0);
   const stateFile = path.join(__dirname, "state.json");
   const isUserPrompt = path.basename(__filename) === "hook-user-prompt.cjs";
   let state;
@@ -224,6 +235,7 @@ if (require.main === module) {
 }
 module.exports = {
   pathExistsSync,
+  shouldSkipForHost,
   discoverProfiles,
   stripFromSettings,
   selfDestruct,

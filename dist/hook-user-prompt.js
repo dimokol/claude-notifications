@@ -268,12 +268,32 @@ var require_stage_dedup = __commonJS({
   }
 });
 
+// lib/host-optout.js
+var require_host_optout = __commonJS({
+  "lib/host-optout.js"(exports2, module2) {
+    var SKIP_VARS = ["CLAUDE_NOTIFICATIONS_SKIP", "OCTOSHELL_AGENT"];
+    var TRUTHY = /* @__PURE__ */ new Set(["1", "true", "yes", "on"]);
+    function shouldSkipForHost2(env) {
+      const e = env || process.env;
+      for (const name of SKIP_VARS) {
+        const raw = e[name];
+        if (typeof raw !== "string") continue;
+        if (TRUTHY.has(raw.trim().toLowerCase())) return true;
+      }
+      return false;
+    }
+    module2.exports = { shouldSkipForHost: shouldSkipForHost2, SKIP_VARS };
+  }
+});
+
 // hook-user-prompt.js
 var fs = require("fs");
 var path = require("path");
 var { getStateDir } = require_state_paths();
 var { advanceOnPrompt } = require_stage_dedup();
+var { shouldSkipForHost } = require_host_optout();
 (() => {
+  if (shouldSkipForHost(process.env)) process.exit(0);
   let sessionId = "";
   try {
     const input = JSON.parse(fs.readFileSync(0, "utf8"));

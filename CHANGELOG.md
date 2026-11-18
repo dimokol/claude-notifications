@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.8.0] - 2026-09-17
+
+### Added
+- **An opt-out for hosts that run Claude Code themselves.** A desktop host (OctoShell, for example) launches `claude` headlessly with your own config dir, so our hooks fire for sessions that live in no terminal and that the host already announces: two banners for one event. Exporting `CLAUDE_NOTIFICATIONS_SKIP=1` (or `OCTOSHELL_AGENT=1`, which OctoShell sets on every agent it spawns) into the CLI's environment now makes the hook exit before it touches any state. `0`, `false` and an unset variable behave as before, so a host can leave the variable in place and switch it per session.
+
 ## [3.7.0] - 2026-07-22
 
 ### Fixed

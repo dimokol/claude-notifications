@@ -1090,6 +1090,24 @@ var require_mac_code_cli = __commonJS({
   }
 });
 
+// lib/host-optout.js
+var require_host_optout = __commonJS({
+  "lib/host-optout.js"(exports2, module2) {
+    var SKIP_VARS = ["CLAUDE_NOTIFICATIONS_SKIP", "OCTOSHELL_AGENT"];
+    var TRUTHY = /* @__PURE__ */ new Set(["1", "true", "yes", "on"]);
+    function shouldSkipForHost2(env) {
+      const e = env || process.env;
+      for (const name of SKIP_VARS) {
+        const raw = e[name];
+        if (typeof raw !== "string") continue;
+        if (TRUTHY.has(raw.trim().toLowerCase())) return true;
+      }
+      return false;
+    }
+    module2.exports = { shouldSkipForHost: shouldSkipForHost2, SKIP_VARS };
+  }
+});
+
 // hook.js
 var fs = require("fs");
 var path = require("path");
@@ -1112,6 +1130,7 @@ var { schemeForBinaryName, classifyBuild } = require_code_build();
 var { classifyHookInput, extractQuestionText } = require_hook_input();
 var { readTerminalNamesCache, lookupCustomName } = require_terminal_names();
 var { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require_mac_code_cli();
+var { shouldSkipForHost } = require_host_optout();
 var SHELL_PROCESS_NAMES = /* @__PURE__ */ new Set([
   "bash.exe",
   "sh.exe",
@@ -1212,6 +1231,7 @@ function xmlEsc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 (async () => {
+  if (shouldSkipForHost(process.env)) process.exit(0);
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const projectName = path.basename(projectDir);
   let hookEvent = "waiting";

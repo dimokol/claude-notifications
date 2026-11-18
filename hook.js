@@ -37,6 +37,7 @@ const { schemeForBinaryName, classifyBuild } = require('./lib/code-build');
 const { classifyHookInput, extractQuestionText } = require('./lib/hook-input');
 const { readTerminalNamesCache, lookupCustomName } = require('./lib/terminal-names');
 const { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require('./lib/mac-code-cli');
+const { shouldSkipForHost } = require('./lib/host-optout');
 
 // Process names we consider "the interactive shell hosting Claude". The
 // first ancestor matching one of these is recorded as signal.shellPid —
@@ -131,6 +132,12 @@ function xmlEsc(s) {
 }
 
 (async () => {
+  // --- 0. Host opt-out ---
+  // A headless host (OctoShell and the like) runs Claude with the user's own
+  // config dir, so our hooks fire for a session that lives in no terminal and
+  // that the host already notifies about. Leave before touching any state.
+  if (shouldSkipForHost(process.env)) process.exit(0);
+
   // --- 1. Read input ---
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();

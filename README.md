@@ -25,6 +25,10 @@ Works on **macOS**, **Windows**, and **Linux**, across multiple VS Code windows 
 
    If you ever need to re-run setup: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**.
 
+## What's New in v3.8.0
+
+- **No more double banners when another app runs Claude for you.** Hosts that spawn `claude` with your config dir (OctoShell and the like) can set `CLAUDE_NOTIFICATIONS_SKIP=1` in the CLI's environment and this extension stays quiet for those sessions, leaving the host to notify you. `OCTOSHELL_AGENT=1` works too, so OctoShell needs no configuration.
+
 ## What's New in v3.7.0
 
 - **macOS banner clicks open the editor they came from.** Clicking a VSCodium, Cursor, Windsurf, VS Code Insiders, or other Code OSS notification now raises that editor and workspace instead of doing nothing or opening VS Code Stable. The right launcher is detected automatically. Thanks **[@jmuheim](https://github.com/jmuheim)** for filing [#5](https://github.com/dimokol/claude-notifications/issues/5) with the precise diagnosis and suggested fix.

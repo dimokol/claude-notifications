@@ -27,6 +27,18 @@ function pathExistsSync(p) {
   try { fs.accessSync(p); return true; } catch (_) { return false; }
 }
 
+// Keep in sync with lib/host-optout.js.
+const SKIP_VARS = ['CLAUDE_NOTIFICATIONS_SKIP', 'OCTOSHELL_AGENT'];
+function shouldSkipForHost(env) {
+  const e = env || process.env;
+  for (const name of SKIP_VARS) {
+    const raw = e[name];
+    if (typeof raw !== 'string') continue;
+    if (['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
 function discoverProfiles(home) {
   const result = [];
   let entries;
@@ -183,6 +195,11 @@ function findNewestExtensionHook(recordedPath, isUserPrompt, fsLike = fs) {
 }
 
 function main() {
+  // Host opt-out, checked before the state file is even read: see
+  // lib/host-optout.js. Inlined because this file must stay dependency-free —
+  // the copy under ~/.claude/claude-notifications/ has no lib/ beside it.
+  if (shouldSkipForHost(process.env)) process.exit(0);
+
   const stateFile = path.join(__dirname, 'state.json');
   const isUserPrompt = path.basename(__filename) === 'hook-user-prompt.cjs';
 
@@ -236,6 +253,7 @@ if (require.main === module) {
 
 module.exports = {
   pathExistsSync,
+  shouldSkipForHost,
   discoverProfiles,
   stripFromSettings,
   selfDestruct,

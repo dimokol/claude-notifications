@@ -7,8 +7,13 @@ const fs = require('fs');
 const path = require('path');
 const { getStateDir } = require('./lib/state-paths');
 const { advanceOnPrompt } = require('./lib/stage-dedup');
+const { shouldSkipForHost } = require('./lib/host-optout');
 
 (() => {
+  // A host that opts out of our notifications gets no stage bookkeeping
+  // either: nothing reads it, and the writes would churn the state dir.
+  if (shouldSkipForHost(process.env)) process.exit(0);
+
   let sessionId = '';
   try {
     const input = JSON.parse(fs.readFileSync(0, 'utf8'));
