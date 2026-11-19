@@ -1,0 +1,12 @@
+**The viewer is a permanent tool now**
+- It lives in `tools/car-viewer/`, with a README covering the manifest format, so it works for any car's exports. It no longer needs the dev server, which had stopped.
+- `tools/car-viewer/serve.sh <data folder>` runs a small Python server on 127.0.0.1:3029. It's running now, and I'll stop it once you're done looking.
+- I saved a memory note so future 3D work comes to you in the viewer.
+
+**Questions**
+1. How does Round 1c look for L03, F05, F04 and the scoop's right front corner? If one is still wrong, a copied view (C) is the fastest way to point me at it.
+2. Can I approve the flips' surface change as a per-entry exception, capped at each entry's measured value (largest 0.52 mm)? I recommend yes. Then F01, F02, F14 and F17 become the first step 03 checkpoints.
+3. Once round 1 is through the pipeline, I move on to round 2, mirrors and doors. Same way, viewer first? I recommend yes.
+
+---
+**Tip:** you called the hood spot "F05" while F05 was also the fender triangle, so I had to guess which one you meant. With the viewer's new C button, one pasted view per spot ("this one: {...}") pins the exact place without needing the ID.

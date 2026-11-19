@@ -130,3 +130,59 @@ test('asksUser: the close phrase, early questions and code are not asks', () => 
   assert.equal(asksUser(''), false);
   assert.equal(asksUser(undefined), false);
 });
+
+test('real ending: numbered "? I recommend yes." questions plus a Tip block beat a running viewer server', () => {
+  const msg = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'stop-ending-recommend-questions.txt'), 'utf8');
+  const r = classifyStop(stop(msg, { background_tasks: [{ description: 'Start the viewer server on 127.0.0.1:3029 again' }] }), []);
+  assert.equal(r.state, 'needs-you');
+  assert.equal(r.reason, 'stop');
+  assert.match(r.detail, /^3\. Once round 1 is through the pipeline/);
+});
+
+test('asksUser: a question followed only by a recommendation', () => {
+  assert.equal(asksUser('Done.\n1. Can I go ahead? I recommend yes.'), true);
+  assert.equal(asksUser('Done.\n1. Can I go ahead? I\'d recommend yes, because it is cheap.'), true);
+  assert.equal(asksUser('Done.\n2. Port 3029 or 3030? (Recommended: 3029)'), true);
+  assert.equal(asksUser('Done.\n2. Port 3029 or 3030? Recommended: 3029.'), true);
+  assert.equal(asksUser('Done.\n2. Port 3029 or 3030? **Rec:** 3029'), true);
+  assert.equal(asksUser('Done.\n2. Port 3029 or 3030? My pick: 3029.'), true);
+  assert.equal(asksUser('Done.\n2. Port 3029 or 3030? I suggest 3029.'), true);
+});
+
+test('asksUser: a trailing Tip block neither hides the questions nor counts as one', () => {
+  const qs = 'Built it.\n\n**Questions**\n1. Ship it now? I recommend yes.\n';
+  const tip = '\n---\n**Tip:** ' + 'you could paste the exact view next time, which saves a guess. '.repeat(8);
+  assert.equal(asksUser(qs + tip), true);
+  assert.equal(asksUser('All tests pass and the build is clean.\n\n---\n**Tip:** why not try "rec" next time?'), false);
+});
+
+test('asksUser: a bare Questions / Decisions header in the tail', () => {
+  assert.equal(asksUser('Built it.\n\n**Questions**\n1. Pick the port. I lean to 3029.'), true);
+  assert.equal(asksUser('Built it.\n\n## Questions\n- port number, 3029 by default'), true);
+  assert.equal(asksUser('Built it.\n\nDecision needed:\nA or B, I lean A.'), true);
+  assert.equal(asksUser('Built it.\n\n**Decisions**\n1. Port: 3029 or 3030.'), true);
+});
+
+test('asksUser: grilling-skill markers', () => {
+  assert.equal(asksUser('❓ **Q1** - **Port**: which port should the viewer use. Options are 3029 and 3030.\n\n➡️ 3029, it is free.'), true);
+  assert.equal(asksUser('Context first.\n\n**Q2** - **Branch**: worktree or same checkout.\n\n➡️ Worktree.'), true);
+});
+
+test('asksUser: recommendations and headers outside a question are not asks', () => {
+  assert.equal(asksUser('Fixed it. I recommend restarting VS Code so the hook reloads.'), false);
+  assert.equal(asksUser('Why did it fail? The cache was stale. Fixed and verified.'), false);
+  assert.equal(asksUser('Done.\n\n**Questions answered**\n- port: 3029 (you picked it)'), false);
+  assert.equal(asksUser('Next ➡️ deploy runs after CI, nothing needed from you.'), false);
+});
+
+test('asksUser: replay false positives stay quiet (Q references, quoted "your turn")', () => {
+  assert.equal(asksUser('Q2 and Q3 noted: logs stay off the PC for now.\n\nOnce 032 is back, I will bring the list.'), false);
+  assert.equal(asksUser('**Q4, done, and it failed again** with the same error.'), false);
+  assert.equal(asksUser('One refusal came from my test prompt ("join, then end your turn"), which Codex misread.'), false);
+});
+
+test('asksUser: earlier questions still open', () => {
+  assert.equal(asksUser('Built the page.\n\nQ1 to Q11 from my last message are still open.'), true);
+  assert.equal(asksUser('Built the page.\n\nThe two questions above are still open.'), true);
+  assert.equal(asksUser('Built the page. PR #12 is still open.'), false);
+});

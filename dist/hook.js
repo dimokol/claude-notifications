@@ -1116,7 +1116,12 @@ var require_stop_classifier = __commonJS({
     var AGENT_CHAT_POST = "mcp__agent-chat__post";
     var ASK_TAIL_CHARS = 600;
     var QUESTION_LINE = /\?[\s*_)"'`\u201d]*$/;
-    var ASK_PHRASE = /\byour (go|call|pick|answer|answers|decision|input|review)\b|\bneeds? your\b|\bwaiting (on|for) you\b|\b(questions?|decisions?) for you\b|\bopen questions?\b/i;
+    var QUESTION_THEN_REC = /\?[\s*_)"'`\u201d]*[(\-:]*\s*[*_]*\s*(i'?d? (recommend|suggest|lean)|recommend(ed|ation)?\b|rec\b|my (pick|vote|rec)\b|\u27a1)/;
+    var ASK_PHRASE = /\byour (go|call|pick|answer|answers|decision|input|review)\b|\bneeds? your\b|\bwaiting (on|for) you\b|\b(questions?|decisions?) for you\b|\bopen questions?\b|\b(q\d+|questions?)\b[^.]*\bstill open\b/i;
+    var ASK_HEADER = /^[#*_\s]*(open |pending )?(questions?|decisions?( needed| to make| pending)?)[*_\s:]*$/;
+    var GRILL_QUESTION = /^(\u2753|[*_]*q\d+[*_]*\s*[-\u2013\u2014:])/;
+    var GRILL_ANSWER = /^\u27a1/;
+    var TIP_BLOCK = /\n\s*-{3,}\s*\n\s*[*_]*tip:?[*_]*:?\s[\s\S]*$/i;
     function normalize(s) {
       return s.replace(/[‘’]/g, "'").toLowerCase();
     }
@@ -1136,12 +1141,15 @@ var require_stop_classifier = __commonJS({
     }
     function askLine(msg) {
       if (typeof msg !== "string" || !msg) return "";
-      const withoutCode = msg.replace(/```[\s\S]*?```/g, "");
+      const withoutCode = msg.replace(/```[\s\S]*?```/g, "").replace(TIP_BLOCK, "");
+      const grilled = /\u2753|^[*_]*q\d+\b/im.test(withoutCode);
       const tail = withoutCode.slice(-ASK_TAIL_CHARS);
       const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = normalize(lines[i]).replace(normalize(CLOSE_PHRASE), "");
-        if (QUESTION_LINE.test(line) || ASK_PHRASE.test(line)) return lines[i];
+        if (QUESTION_LINE.test(line) || QUESTION_THEN_REC.test(line) || ASK_PHRASE.test(line) || ASK_HEADER.test(line) || GRILL_QUESTION.test(line) || grilled && GRILL_ANSWER.test(line)) {
+          return lines[i];
+        }
       }
       return "";
     }
