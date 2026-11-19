@@ -34,18 +34,11 @@ test('status-only notification types are skipped entirely', () => {
   }
 });
 
-test('agent_needs_input is a waiting PRIMARY (escapes trailer suppression)', () => {
-  const c = classifyHookInput({ hook_event_name: 'Notification', notification_type: 'agent_needs_input' });
-  assert.equal(c.skip, false);
-  assert.equal(c.event, 'waiting');
-  assert.notEqual(c.dedupEventName, 'Notification',
-    'must not carry the trailer name or stage-dedup would suppress it forever');
-});
-
-test('agent_completed maps to completed and is a primary', () => {
-  const c = classifyHookInput({ hook_event_name: 'Notification', notification_type: 'agent_completed' });
-  assert.equal(c.event, 'completed');
-  assert.notEqual(c.dedupEventName, 'Notification');
+test('agent view notifications are skipped (3.9.0): the background session notifies through its own hooks', () => {
+  for (const nType of ['agent_needs_input', 'agent_completed']) {
+    const c = classifyHookInput({ hook_event_name: 'Notification', notification_type: nType });
+    assert.deepEqual(c, { skip: true }, `type=${nType} must be skipped`);
+  }
 });
 
 test('elicitation_dialog is a waiting primary (has no PR/Stop of its own)', () => {

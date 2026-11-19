@@ -692,11 +692,11 @@ var require_hook_input = __commonJS({
     var SKIP_NOTIFICATION_TYPES = /* @__PURE__ */ new Set([
       "auth_success",
       "elicitation_complete",
-      "elicitation_response"
+      "elicitation_response",
+      "agent_needs_input",
+      "agent_completed"
     ]);
     var PRIMARY_NOTIFICATION_TYPES = {
-      agent_needs_input: { event: "waiting", dedupEventName: "AgentNotification" },
-      agent_completed: { event: "completed", dedupEventName: "AgentNotification" },
       elicitation_dialog: { event: "waiting", dedupEventName: "ElicitationNotification" }
     };
     function classifyHookInput2(input) {
@@ -1108,6 +1108,231 @@ var require_host_optout = __commonJS({
   }
 });
 
+// lib/stop-classifier.js
+var require_stop_classifier = __commonJS({
+  "lib/stop-classifier.js"(exports2, module2) {
+    var CLOSE_PHRASE = "Reply ok and I'll close this session";
+    var MAX_DETAIL = 120;
+    var AGENT_CHAT_POST = "mcp__agent-chat__post";
+    var ASK_TAIL_CHARS = 600;
+    var QUESTION_LINE = /\?[\s*_)"'`\u201d]*$/;
+    var ASK_PHRASE = /\byour (go|call|pick|answer|answers|decision|input|review)\b|\bneeds? your\b|\bwaiting (on|for) you\b|\b(questions?|decisions?) for you\b|\bopen questions?\b/i;
+    function normalize(s) {
+      return s.replace(/[‘’]/g, "'").toLowerCase();
+    }
+    function cap(s) {
+      const t = String(s || "").trim().replace(/\s+/g, " ");
+      return t.length > MAX_DETAIL ? t.slice(0, MAX_DETAIL - 1) + "\u2026" : t;
+    }
+    function firstLine(s) {
+      if (typeof s !== "string") return "";
+      const line = s.split("\n").find((l) => l.trim() !== "");
+      return cap(line || "");
+    }
+    function textOf(content) {
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content.map((b) => b && typeof b.text === "string" ? b.text : "").join(" ");
+    }
+    function askLine(msg) {
+      if (typeof msg !== "string" || !msg) return "";
+      const withoutCode = msg.replace(/```[\s\S]*?```/g, "");
+      const tail = withoutCode.slice(-ASK_TAIL_CHARS);
+      const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = normalize(lines[i]).replace(normalize(CLOSE_PHRASE), "");
+        if (QUESTION_LINE.test(line) || ASK_PHRASE.test(line)) return lines[i];
+      }
+      return "";
+    }
+    function asksUser(msg) {
+      return askLine(msg) !== "";
+    }
+    function entryOrigin(entry) {
+      if (!entry || typeof entry !== "object") return null;
+      if (entry.type === "attachment") {
+        const a = entry.attachment;
+        if (!a || a.type !== "queued_command") return null;
+        return a.origin && typeof a.origin.kind === "string" ? a.origin.kind : null;
+      }
+      if (entry.type !== "user" || entry.isSidechain) return null;
+      const content = entry.message && entry.message.content;
+      if (Array.isArray(content) && content.some((b) => b && b.type === "tool_result")) return null;
+      if (entry.origin && typeof entry.origin.kind === "string") return entry.origin.kind;
+      if (entry.isMeta || entry.isCompactSummary) return null;
+      const text = textOf(content).trim();
+      if (!text || text.startsWith("<")) return null;
+      return "human";
+    }
+    function directPostTarget(entry) {
+      if (!entry || entry.type !== "assistant" || entry.isSidechain) return "";
+      const content = entry.message && entry.message.content;
+      if (!Array.isArray(content)) return "";
+      let target = "";
+      for (const b of content) {
+        if (!b || b.type !== "tool_use" || b.name !== AGENT_CHAT_POST) continue;
+        const input = b.input || {};
+        if (typeof input.to === "string" && input.to && input.fyi !== true) target = input.to;
+      }
+      return target;
+    }
+    function pendingPeer(entries) {
+      let start = 0;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entryOrigin(entries[i]) === "human") {
+          start = i;
+          break;
+        }
+      }
+      let waitingOn = "";
+      for (let i = start; i < entries.length; i++) {
+        const to = directPostTarget(entries[i]);
+        if (to) {
+          waitingOn = to;
+          continue;
+        }
+        if (waitingOn && entryOrigin(entries[i]) === "peer") waitingOn = "";
+      }
+      return waitingOn;
+    }
+    function classifyStop2(payload, entries) {
+      const p = payload && typeof payload === "object" ? payload : {};
+      const msg = typeof p.last_assistant_message === "string" ? p.last_assistant_message : "";
+      const ask = askLine(msg);
+      if (ask) return { state: "needs-you", reason: "stop", detail: cap(ask) };
+      const tasks = Array.isArray(p.background_tasks) ? p.background_tasks : [];
+      const crons = Array.isArray(p.session_crons) ? p.session_crons : [];
+      if (tasks.length > 0 || crons.length > 0) {
+        const first = tasks.find((t) => t && t.description) || crons.find((c) => c && (c.prompt || c.description));
+        const detail = first ? cap(first.description || first.prompt) : "";
+        return { state: "waiting", reason: "background", detail };
+      }
+      const peer = pendingPeer(Array.isArray(entries) ? entries.filter((e) => e && typeof e === "object") : []);
+      if (peer) return { state: "waiting", reason: "peer", detail: cap(`reply from ${peer}`) };
+      if (normalize(msg).includes(normalize(CLOSE_PHRASE))) {
+        return { state: "done", reason: "close-phrase", detail: firstLine(msg) };
+      }
+      return { state: "needs-you", reason: "stop", detail: firstLine(msg) };
+    }
+    module2.exports = { classifyStop: classifyStop2, entryOrigin, asksUser, CLOSE_PHRASE, MAX_DETAIL };
+  }
+});
+
+// lib/transcript-turn.js
+var require_transcript_turn = __commonJS({
+  "lib/transcript-turn.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var { entryOrigin } = require_stop_classifier();
+    var DEFAULT_CHUNK = 256 * 1024;
+    var DEFAULT_MAX = 8 * 1024 * 1024;
+    function parseLines(text, dropFirst) {
+      const lines = text.split("\n");
+      if (dropFirst) lines.shift();
+      const out = [];
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        try {
+          out.push(JSON.parse(l));
+        } catch (_) {
+        }
+      }
+      return out;
+    }
+    function readTurnEntries2(transcriptPath, { chunkBytes = DEFAULT_CHUNK, maxBytes = DEFAULT_MAX } = {}) {
+      let fd;
+      try {
+        fd = fs2.openSync(transcriptPath, "r");
+        const size = fs2.fstatSync(fd).size;
+        let window = Math.min(chunkBytes, size);
+        for (; ; ) {
+          const buf = Buffer.alloc(window);
+          fs2.readSync(fd, buf, 0, window, size - window);
+          const entries = parseLines(buf.toString("utf8"), window < size);
+          for (let i = entries.length - 1; i >= 0; i--) {
+            if (entryOrigin(entries[i]) === "human") return entries.slice(i);
+          }
+          if (window >= size || window >= maxBytes) return entries;
+          window = Math.min(window * 2, size, maxBytes);
+        }
+      } catch (_) {
+        return [];
+      } finally {
+        if (fd !== void 0) try {
+          fs2.closeSync(fd);
+        } catch (_) {
+        }
+      }
+    }
+    module2.exports = { readTurnEntries: readTurnEntries2 };
+  }
+});
+
+// lib/attention-state.js
+var require_attention_state = __commonJS({
+  "lib/attention-state.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var os2 = require("os");
+    var path2 = require("path");
+    var SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+    var CARRY_OVER = ["cwd", "configDir", "claudePid", "shellPid", "transcriptPath"];
+    var NOTIFY_STATES = /* @__PURE__ */ new Set(["needs-you", "done"]);
+    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase"]);
+    function getAttentionDir() {
+      return path2.join(os2.homedir(), ".claude-shared", "session-attention");
+    }
+    function getAttentionPath(sessionId) {
+      if (typeof sessionId !== "string" || !SAFE_ID.test(sessionId)) return null;
+      return path2.join(getAttentionDir(), `${sessionId}.json`);
+    }
+    function readAttentionState(sessionId) {
+      const p = getAttentionPath(sessionId);
+      if (!p) return null;
+      try {
+        return JSON.parse(fs2.readFileSync(p, "utf8"));
+      } catch (_) {
+        return null;
+      }
+    }
+    function writeAttentionState2(sessionId, fields, { now = Date.now() } = {}) {
+      const p = getAttentionPath(sessionId);
+      if (!p) return { written: false, previous: null };
+      const previous = readAttentionState(sessionId);
+      if (previous && Date.parse(previous.updatedAt) > now) return { written: false, previous };
+      const f = fields || {};
+      const state = {
+        v: 1,
+        sessionId,
+        agent: "claude",
+        state: f.state,
+        reason: f.reason || "",
+        detail: f.detail || ""
+      };
+      for (const key of CARRY_OVER) {
+        const value = f[key] !== void 0 && f[key] !== null && f[key] !== "" && f[key] !== 0 ? f[key] : previous ? previous[key] : void 0;
+        if (value !== void 0) state[key] = value;
+      }
+      state.updatedAt = new Date(now).toISOString();
+      try {
+        fs2.mkdirSync(path2.dirname(p), { recursive: true });
+        const tmp = `${p}.${process.pid}.tmp`;
+        fs2.writeFileSync(tmp, JSON.stringify(state));
+        fs2.renameSync(tmp, p);
+        return { written: true, previous };
+      } catch (_) {
+        return { written: false, previous };
+      }
+    }
+    function shouldNotifyTransition2(previous, next) {
+      if (!next || !NOTIFY_STATES.has(next.state)) return false;
+      if (previous && previous.state === next.state && previous.reason === next.reason && STOP_REASONS.has(next.reason)) {
+        return false;
+      }
+      return true;
+    }
+    module2.exports = { getAttentionDir, getAttentionPath, readAttentionState, writeAttentionState: writeAttentionState2, shouldNotifyTransition: shouldNotifyTransition2 };
+  }
+});
+
 // hook.js
 var fs = require("fs");
 var path = require("path");
@@ -1131,6 +1356,9 @@ var { classifyHookInput, extractQuestionText } = require_hook_input();
 var { readTerminalNamesCache, lookupCustomName } = require_terminal_names();
 var { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require_mac_code_cli();
 var { shouldSkipForHost } = require_host_optout();
+var { classifyStop } = require_stop_classifier();
+var { readTurnEntries } = require_transcript_turn();
+var { writeAttentionState, shouldNotifyTransition } = require_attention_state();
 var SHELL_PROCESS_NAMES = /* @__PURE__ */ new Set([
   "bash.exe",
   "sh.exe",
@@ -1230,6 +1458,13 @@ function buildHiddenPsArgv(tmpScript) {
 function xmlEsc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
+function findClaudePid(chain, configDir) {
+  for (const node of chain) {
+    if (fs.existsSync(path.join(configDir, "sessions", `${node.pid}.json`))) return node.pid;
+  }
+  const named = chain.find((n) => n.name && n.name.toLowerCase().replace(/^.*[/\\]/, "") === "claude");
+  return named ? named.pid : 0;
+}
 (async () => {
   if (shouldSkipForHost(process.env)) process.exit(0);
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -1241,9 +1476,13 @@ function xmlEsc(s) {
   let sessionId = "";
   let transcriptPath = "";
   let question = "";
+  let toolName = "";
+  let hookInput = {};
+  const hookStartedAt = Date.now();
   try {
     const stdinData = fs.readFileSync(0, "utf8");
     const input = JSON.parse(stdinData);
+    if (input && typeof input === "object") hookInput = input;
     hookMessage = typeof input.message === "string" ? input.message : "";
     sessionId = input.session_id || "";
     transcriptPath = typeof input.transcript_path === "string" ? input.transcript_path : "";
@@ -1252,7 +1491,7 @@ function xmlEsc(s) {
     hookEvent = cls.event;
     hookEventName = cls.hookEventName;
     dedupEventName = cls.dedupEventName;
-    const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+    toolName = typeof input.tool_name === "string" ? input.tool_name : "";
     const toolInput = input.tool_input && typeof input.tool_input === "object" ? input.tool_input : null;
     question = extractQuestionText(toolName, toolInput);
   } catch (_) {
@@ -1293,11 +1532,6 @@ function xmlEsc(s) {
   const signalPath = getSignalPath(workspaceRoot);
   const claimPath = getClaimedPath(workspaceRoot);
   const clickedPath = getClickedPath(workspaceRoot);
-  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent, dedupEventName || hookEventName);
-  if (!dedup.notify) {
-    process.exit(0);
-  }
-  const claimTag = sessionId && dedup.stageId ? `${sessionId}:${dedup.stageId}` : "";
   const snap = processSnapshot();
   const chain = walkUp(snap, process.pid);
   const pids = chain.map((n) => n.pid);
@@ -1314,6 +1548,38 @@ function xmlEsc(s) {
       break;
     }
   }
+  const rawEvent = hookEventName.toLowerCase();
+  if (sessionId && (rawEvent === "stop" || rawEvent === "permissionrequest" || rawEvent === "pretooluse")) {
+    let next;
+    if (rawEvent === "stop") {
+      next = classifyStop(hookInput, transcriptPath ? readTurnEntries(transcriptPath) : []);
+    } else {
+      next = question || toolName === "AskUserQuestion" ? { state: "needs-you", reason: "question", detail: question } : { state: "needs-you", reason: "permission", detail: toolName };
+    }
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    const res = writeAttentionState(sessionId, {
+      ...next,
+      cwd: typeof hookInput.cwd === "string" ? hookInput.cwd : projectDir,
+      configDir,
+      claudePid: findClaudePid(chain, configDir),
+      shellPid,
+      transcriptPath
+    }, { now: hookStartedAt });
+    const stale = !res.written && res.previous && Date.parse(res.previous.updatedAt) > hookStartedAt;
+    if (stale || !shouldNotifyTransition(res.previous, next)) {
+      try {
+        process.stderr.write(`claude-notifications: attention ${next.state}/${next.reason}${stale ? " (stale)" : ""}, no notification
+`);
+      } catch (_) {
+      }
+      process.exit(0);
+    }
+  }
+  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent, dedupEventName || hookEventName);
+  if (!dedup.notify) {
+    process.exit(0);
+  }
+  const claimTag = sessionId && dedup.stageId ? `${sessionId}:${dedup.stageId}` : "";
   try {
     const tip = chain.length > 0 ? chain[chain.length - 1] : null;
     const tipDesc = tip ? `pid=${tip.pid} name=${tip.name || "?"}` : "empty-chain";

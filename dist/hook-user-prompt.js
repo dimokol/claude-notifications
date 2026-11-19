@@ -268,6 +268,72 @@ var require_stage_dedup = __commonJS({
   }
 });
 
+// lib/attention-state.js
+var require_attention_state = __commonJS({
+  "lib/attention-state.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var os = require("os");
+    var path2 = require("path");
+    var SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+    var CARRY_OVER = ["cwd", "configDir", "claudePid", "shellPid", "transcriptPath"];
+    var NOTIFY_STATES = /* @__PURE__ */ new Set(["needs-you", "done"]);
+    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase"]);
+    function getAttentionDir() {
+      return path2.join(os.homedir(), ".claude-shared", "session-attention");
+    }
+    function getAttentionPath(sessionId) {
+      if (typeof sessionId !== "string" || !SAFE_ID.test(sessionId)) return null;
+      return path2.join(getAttentionDir(), `${sessionId}.json`);
+    }
+    function readAttentionState(sessionId) {
+      const p = getAttentionPath(sessionId);
+      if (!p) return null;
+      try {
+        return JSON.parse(fs2.readFileSync(p, "utf8"));
+      } catch (_) {
+        return null;
+      }
+    }
+    function writeAttentionState2(sessionId, fields, { now = Date.now() } = {}) {
+      const p = getAttentionPath(sessionId);
+      if (!p) return { written: false, previous: null };
+      const previous = readAttentionState(sessionId);
+      if (previous && Date.parse(previous.updatedAt) > now) return { written: false, previous };
+      const f = fields || {};
+      const state = {
+        v: 1,
+        sessionId,
+        agent: "claude",
+        state: f.state,
+        reason: f.reason || "",
+        detail: f.detail || ""
+      };
+      for (const key of CARRY_OVER) {
+        const value = f[key] !== void 0 && f[key] !== null && f[key] !== "" && f[key] !== 0 ? f[key] : previous ? previous[key] : void 0;
+        if (value !== void 0) state[key] = value;
+      }
+      state.updatedAt = new Date(now).toISOString();
+      try {
+        fs2.mkdirSync(path2.dirname(p), { recursive: true });
+        const tmp = `${p}.${process.pid}.tmp`;
+        fs2.writeFileSync(tmp, JSON.stringify(state));
+        fs2.renameSync(tmp, p);
+        return { written: true, previous };
+      } catch (_) {
+        return { written: false, previous };
+      }
+    }
+    function shouldNotifyTransition(previous, next) {
+      if (!next || !NOTIFY_STATES.has(next.state)) return false;
+      if (previous && previous.state === next.state && previous.reason === next.reason && STOP_REASONS.has(next.reason)) {
+        return false;
+      }
+      return true;
+    }
+    module2.exports = { getAttentionDir, getAttentionPath, readAttentionState, writeAttentionState: writeAttentionState2, shouldNotifyTransition };
+  }
+});
+
 // lib/host-optout.js
 var require_host_optout = __commonJS({
   "lib/host-optout.js"(exports2, module2) {
@@ -291,12 +357,15 @@ var fs = require("fs");
 var path = require("path");
 var { getStateDir } = require_state_paths();
 var { advanceOnPrompt } = require_stage_dedup();
+var { writeAttentionState } = require_attention_state();
 var { shouldSkipForHost } = require_host_optout();
 (() => {
   if (shouldSkipForHost(process.env)) process.exit(0);
+  const startedAt = Date.now();
   let sessionId = "";
+  let input = {};
   try {
-    const input = JSON.parse(fs.readFileSync(0, "utf8"));
+    input = JSON.parse(fs.readFileSync(0, "utf8")) || {};
     sessionId = typeof input.session_id === "string" ? input.session_id : "";
   } catch (_) {
     process.exit(0);
@@ -315,4 +384,11 @@ var { shouldSkipForHost } = require_host_optout();
   }
   fs.mkdirSync(getStateDir(workspaceRoot), { recursive: true });
   advanceOnPrompt(workspaceRoot, sessionId);
+  writeAttentionState(sessionId, {
+    state: "working",
+    reason: "prompt",
+    cwd: typeof input.cwd === "string" ? input.cwd : projectDir,
+    configDir: process.env.CLAUDE_CONFIG_DIR || void 0,
+    transcriptPath: typeof input.transcript_path === "string" ? input.transcript_path : void 0
+  }, { now: startedAt });
 })();
