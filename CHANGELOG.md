@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.9.0] - 2026-11-19
+
+### Changed
+- **Notifications only when a session needs you or is done.** A finished turn no longer notifies when Claude stopped only to wait for its own background work (a subagent, a shell, a monitor, a scheduled wakeup), which the `Stop` hook now reads from `background_tasks` / `session_crons`. It also stays quiet when the turn ended with a direct agent-chat message to another session and no reply has arrived yet, and when another background wake-up turn ends in the same state as the last one. A question for you at the end of the message always wins over waiting. Sessions that end with "Reply ok and I'll close this session" count as done. On a replay of 1,141 real turn endings, about 43% would have stayed silent.
+
+### Added
+- **A per-session state file for other tools.** Each Claude session's state (needs-you, working, waiting, done) is written to `~/.claude-shared/session-attention/<sessionId>.json` on every prompt, permission prompt, question and turn end. Terminal Resume reads it to put a "needs you" mark on each terminal tab, so the tab and the notification always agree. The hooks still print nothing into Claude's context.
+
 ## [3.8.0] - 2026-09-17
 
 ### Added

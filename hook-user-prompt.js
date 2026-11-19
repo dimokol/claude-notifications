@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { getStateDir } = require('./lib/state-paths');
 const { advanceOnPrompt } = require('./lib/stage-dedup');
+const { writeAttentionState } = require('./lib/attention-state');
 const { shouldSkipForHost } = require('./lib/host-optout');
 
 (() => {
@@ -14,9 +15,11 @@ const { shouldSkipForHost } = require('./lib/host-optout');
   // either: nothing reads it, and the writes would churn the state dir.
   if (shouldSkipForHost(process.env)) process.exit(0);
 
+  const startedAt = Date.now();
   let sessionId = '';
+  let input = {};
   try {
-    const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+    input = JSON.parse(fs.readFileSync(0, 'utf8')) || {};
     sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   } catch (_) {
     process.exit(0);
@@ -38,4 +41,16 @@ const { shouldSkipForHost } = require('./lib/host-optout');
   // Ensure state dir exists before any write.
   fs.mkdirSync(getStateDir(workspaceRoot), { recursive: true });
   advanceOnPrompt(workspaceRoot, sessionId);
+
+  // He acted: the tab's mark clears. Pids carry over from the last Stop or
+  // permission event (this hook is synchronous, so no process walk here).
+  // Must print nothing: UserPromptSubmit stdout is injected into the model's
+  // context.
+  writeAttentionState(sessionId, {
+    state: 'working',
+    reason: 'prompt',
+    cwd: typeof input.cwd === 'string' ? input.cwd : projectDir,
+    configDir: process.env.CLAUDE_CONFIG_DIR || undefined,
+    transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : undefined
+  }, { now: startedAt });
 })();

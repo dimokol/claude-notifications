@@ -38,6 +38,9 @@ const { classifyHookInput, extractQuestionText } = require('./lib/hook-input');
 const { readTerminalNamesCache, lookupCustomName } = require('./lib/terminal-names');
 const { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require('./lib/mac-code-cli');
 const { shouldSkipForHost } = require('./lib/host-optout');
+const { classifyStop } = require('./lib/stop-classifier');
+const { readTurnEntries } = require('./lib/transcript-turn');
+const { writeAttentionState, shouldNotifyTransition } = require('./lib/attention-state');
 
 // Process names we consider "the interactive shell hosting Claude". The
 // first ancestor matching one of these is recorded as signal.shellPid —
@@ -131,6 +134,17 @@ function xmlEsc(s) {
     .replace(/'/g, '&apos;');
 }
 
+// The Claude process in our ancestor chain: the one whose session marker
+// (<configDir>/sessions/<pid>.json) exists, else the first node named claude.
+// Terminal Resume joins on it to read the live marker status.
+function findClaudePid(chain, configDir) {
+  for (const node of chain) {
+    if (fs.existsSync(path.join(configDir, 'sessions', `${node.pid}.json`))) return node.pid;
+  }
+  const named = chain.find(n => n.name && n.name.toLowerCase().replace(/^.*[/\\]/, '') === 'claude');
+  return named ? named.pid : 0;
+}
+
 (async () => {
   // --- 0. Host opt-out ---
   // A headless host (OctoShell and the like) runs Claude with the user's own
@@ -150,9 +164,13 @@ function xmlEsc(s) {
   let sessionId = '';
   let transcriptPath = '';
   let question = '';
+  let toolName = '';
+  let hookInput = {};
+  const hookStartedAt = Date.now();
   try {
     const stdinData = fs.readFileSync(0, 'utf8');
     const input = JSON.parse(stdinData);
+    if (input && typeof input === 'object') hookInput = input;
     hookMessage = typeof input.message === 'string' ? input.message : '';
     sessionId = input.session_id || '';
     transcriptPath = typeof input.transcript_path === 'string' ? input.transcript_path : '';
@@ -168,7 +186,7 @@ function xmlEsc(s) {
 
     // AskUserQuestion (via PermissionRequest or PreToolUse) carries the
     // question in tool_input — surface it in the banner/toast text.
-    const toolName = typeof input.tool_name === 'string' ? input.tool_name : '';
+    toolName = typeof input.tool_name === 'string' ? input.tool_name : '';
     const toolInput = (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input : null;
     question = extractQuestionText(toolName, toolInput);
   } catch (_) {}
@@ -223,23 +241,7 @@ function xmlEsc(s) {
   const claimPath = getClaimedPath(workspaceRoot);
   const clickedPath = getClickedPath(workspaceRoot);
 
-  // --- Stage-ID dedup ---
-  // Suppress re-fires of Stop/Notification for an already-notified,
-  // unresolved stage. Stage advances on event-type change, on previous
-  // stage being resolved (user ack), or on UserPromptSubmit (handled by
-  // hook-user-prompt.js). See lib/stage-dedup.js for the full state machine.
-  // The machine reasons about dedupEventName (which reclassifies e.g.
-  // Notification(agent_needs_input) as a primary), not the raw name.
-  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent, dedupEventName || hookEventName);
-  if (!dedup.notify) {
-    process.exit(0);
-  }
-  // Tags the claim marker with this attention point's identity so a claim
-  // left by the PREVIOUS stage can't swallow this notification (see
-  // lib/signals.js#CLAIM_CROSS_STAGE_STEAL_MS).
-  const claimTag = (sessionId && dedup.stageId) ? `${sessionId}:${dedup.stageId}` : '';
-
-  // --- 4. Build PID ancestor chain ---
+  // --- 3b. Build PID ancestor chain ---
   //
   // One process-tree snapshot, then a pure JS walk up from process.pid.
   // Previously we ran one `wmic`/`ps` subprocess per ancestor; on Windows
@@ -273,6 +275,56 @@ function xmlEsc(s) {
       break;
     }
   }
+
+  // --- 4b. Session attention state (shared with Terminal Resume) ---
+  // Written for every event that changes what the session needs from the
+  // user, BEFORE dedup, so the tab mark stays right even when we stay quiet.
+  // Notifications then follow the same transition: only entering needs-you
+  // or done notifies; a Stop that is waiting on background work or a peer,
+  // or a repeat of the previous Stop's state (another wake-up turn), exits.
+  const rawEvent = hookEventName.toLowerCase();
+  if (sessionId && (rawEvent === 'stop' || rawEvent === 'permissionrequest' || rawEvent === 'pretooluse')) {
+    let next;
+    if (rawEvent === 'stop') {
+      next = classifyStop(hookInput, transcriptPath ? readTurnEntries(transcriptPath) : []);
+    } else {
+      next = question || toolName === 'AskUserQuestion'
+        ? { state: 'needs-you', reason: 'question', detail: question }
+        : { state: 'needs-you', reason: 'permission', detail: toolName };
+    }
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+    const res = writeAttentionState(sessionId, {
+      ...next,
+      cwd: typeof hookInput.cwd === 'string' ? hookInput.cwd : projectDir,
+      configDir,
+      claudePid: findClaudePid(chain, configDir),
+      shellPid,
+      transcriptPath
+    }, { now: hookStartedAt });
+    const stale = !res.written && res.previous && Date.parse(res.previous.updatedAt) > hookStartedAt;
+    if (stale || !shouldNotifyTransition(res.previous, next)) {
+      try {
+        process.stderr.write(`claude-notifications: attention ${next.state}/${next.reason}${stale ? ' (stale)' : ''}, no notification\n`);
+      } catch (_) {}
+      process.exit(0);
+    }
+  }
+
+  // --- Stage-ID dedup ---
+  // Suppress re-fires of Stop/Notification for an already-notified,
+  // unresolved stage. Stage advances on event-type change, on previous
+  // stage being resolved (user ack), or on UserPromptSubmit (handled by
+  // hook-user-prompt.js). See lib/stage-dedup.js for the full state machine.
+  // The machine reasons about dedupEventName (which reclassifies e.g.
+  // Notification(agent_needs_input) as a primary), not the raw name.
+  const dedup = checkShouldNotify(workspaceRoot, sessionId, hookEvent, dedupEventName || hookEventName);
+  if (!dedup.notify) {
+    process.exit(0);
+  }
+  // Tags the claim marker with this attention point's identity so a claim
+  // left by the PREVIOUS stage can't swallow this notification (see
+  // lib/signals.js#CLAIM_CROSS_STAGE_STEAL_MS).
+  const claimTag = (sessionId && dedup.stageId) ? `${sessionId}:${dedup.stageId}` : '';
 
   // Diagnostics — Claude Code captures hook stderr to its hook log.
   // One line, terse, parseable. Surfaces when snapshot acquisition fails
