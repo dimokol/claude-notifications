@@ -692,11 +692,11 @@ var require_hook_input = __commonJS({
     var SKIP_NOTIFICATION_TYPES = /* @__PURE__ */ new Set([
       "auth_success",
       "elicitation_complete",
-      "elicitation_response"
+      "elicitation_response",
+      "agent_needs_input",
+      "agent_completed"
     ]);
     var PRIMARY_NOTIFICATION_TYPES = {
-      agent_needs_input: { event: "waiting", dedupEventName: "AgentNotification" },
-      agent_completed: { event: "completed", dedupEventName: "AgentNotification" },
       elicitation_dialog: { event: "waiting", dedupEventName: "ElicitationNotification" }
     };
     function classifyHookInput2(input) {
