@@ -1139,7 +1139,7 @@ var require_stop_classifier = __commonJS({
       if (!Array.isArray(content)) return "";
       return content.map((b) => b && typeof b.text === "string" ? b.text : "").join(" ");
     }
-    function askLine(msg) {
+    function askLine(msg, questionsOnly = false) {
       if (typeof msg !== "string" || !msg) return "";
       const withoutCode = msg.replace(/```[\s\S]*?```/g, "").replace(TIP_BLOCK, "");
       const grilled = /\u2753|^[*_]*q\d+\b/im.test(withoutCode);
@@ -1147,7 +1147,8 @@ var require_stop_classifier = __commonJS({
       const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = normalize(lines[i]).replace(normalize(CLOSE_PHRASE), "");
-        if (QUESTION_LINE.test(line) || QUESTION_THEN_REC.test(line) || ASK_PHRASE.test(line) || ASK_HEADER.test(line) || GRILL_QUESTION.test(line) || grilled && GRILL_ANSWER.test(line)) {
+        const question = QUESTION_LINE.test(line) || QUESTION_THEN_REC.test(line) || GRILL_QUESTION.test(line) || grilled && GRILL_ANSWER.test(line);
+        if (question || !questionsOnly && (ASK_PHRASE.test(line) || ASK_HEADER.test(line))) {
           return lines[i];
         }
       }
@@ -1206,7 +1207,8 @@ var require_stop_classifier = __commonJS({
     function classifyStop2(payload, entries) {
       const p = payload && typeof payload === "object" ? payload : {};
       const msg = typeof p.last_assistant_message === "string" ? p.last_assistant_message : "";
-      const ask = askLine(msg);
+      const closing = normalize(msg).includes(normalize(CLOSE_PHRASE));
+      const ask = askLine(msg, closing);
       if (ask) return { state: "needs-you", reason: "stop", detail: cap(ask) };
       const tasks = Array.isArray(p.background_tasks) ? p.background_tasks : [];
       const crons = Array.isArray(p.session_crons) ? p.session_crons : [];
@@ -1217,7 +1219,7 @@ var require_stop_classifier = __commonJS({
       }
       const peer = pendingPeer(Array.isArray(entries) ? entries.filter((e) => e && typeof e === "object") : []);
       if (peer) return { state: "waiting", reason: "peer", detail: cap(`reply from ${peer}`) };
-      if (normalize(msg).includes(normalize(CLOSE_PHRASE))) {
+      if (closing) {
         return { state: "done", reason: "close-phrase", detail: firstLine(msg) };
       }
       return { state: "needs-you", reason: "stop", detail: firstLine(msg) };
