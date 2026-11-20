@@ -187,9 +187,10 @@ test('asksUser: earlier questions still open', () => {
   assert.equal(asksUser('Built the page. PR #12 is still open.'), false);
 });
 
-// Real closing messages (2026-11-19) that list open loops needing his go. The
-// close phrase means the session is finished; only a real question beats it.
-test('the close phrase beats "needs your go" in an open-loops list', () => {
+// Real closing messages (2026-11-19) that list open loops needing his go. He
+// wants these marked needs-you: a merge or install he misses is lost work.
+// Done (the close mark) only when the session needs nothing more from him.
+test('"needs your go" beats the close phrase, even in an open-loops list', () => {
   const endings = [
     'Everything here is done: the classifier fix is merged and nothing is pushed. The only open item is still installing a new VSIX so your live sessions get the fix, and that needs your go.',
     'Committing that snapshot, marking the PRs ready, merging and removing the worktrees each still need your go.\n\n**Status:** I removed the test folders.',
@@ -199,8 +200,8 @@ test('the close phrase beats "needs your go" in an open-loops list', () => {
   ];
   for (const e of endings) {
     const r = classifyStop(stop(`${e}\n\n${CLOSE_PHRASE}.`), []);
-    assert.equal(r.state, 'done', e);
-    assert.equal(r.reason, 'close-phrase');
+    assert.equal(r.state, 'needs-you', e);
+    assert.equal(r.reason, 'stop');
   }
 });
 
