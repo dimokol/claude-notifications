@@ -1122,6 +1122,11 @@ var require_stop_classifier = __commonJS({
     var GRILL_QUESTION = /^(\u2753|[*_]*q\d+[*_]*\s*[-\u2013\u2014:])/;
     var GRILL_ANSWER = /^\u27a1/;
     var TIP_BLOCK = /\n\s*-{3,}\s*\n\s*[*_]*tip:?[*_]*:?\s[\s\S]*$/i;
+    var SELF_CLOSE = /\b(this|the) (tab|session) (closes|will close|is closing)\b[^.]*?\b(when|once|as soon as|after|at the end of) this (turn|reply|message)( (ends|finishes|is done))?/;
+    var DONE_PHRASE = /\bnothing (else )?(is )?(left )?(open|pending)\b|\bno open loops?\b|\bsafe to close\b|\bhanded off to a (fresh|new) tab\b/;
+    var NOT_YET = /\b(once|when|after|until|as soon as|if|but|except|unless|not|never|no longer)\b|n't safe/;
+    var DONE_BLOCKER = /\bfor you to decide\b|\bdecide:|\bone ask\b|\bup to you\b|\bwaiting for your\b|\bstill needs? your\b|\bneeds? you\b|\byou('ll| will)? (still )?(need|have) to\b/;
+    var PATH_LINE = /^[`'"]?(\/|~\/|file:\/\/)\S*[`'"]?$/;
     function normalize(s) {
       return s.replace(/[‘’]/g, "'").toLowerCase();
     }
@@ -1139,16 +1144,33 @@ var require_stop_classifier = __commonJS({
       if (!Array.isArray(content)) return "";
       return content.map((b) => b && typeof b.text === "string" ? b.text : "").join(" ");
     }
-    function askLine(msg) {
+    function stripNoise(msg) {
+      return msg.replace(/```[\s\S]*?```/g, "").replace(TIP_BLOCK, "");
+    }
+    function askLine(msg, whole = false) {
       if (typeof msg !== "string" || !msg) return "";
-      const withoutCode = msg.replace(/```[\s\S]*?```/g, "").replace(TIP_BLOCK, "");
+      const withoutCode = stripNoise(msg);
       const grilled = /\u2753|^[*_]*q\d+\b/im.test(withoutCode);
-      const tail = withoutCode.slice(-ASK_TAIL_CHARS);
+      const tail = whole ? withoutCode : withoutCode.slice(-ASK_TAIL_CHARS);
       const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = normalize(lines[i]).replace(normalize(CLOSE_PHRASE), "");
         if (QUESTION_LINE.test(line) || QUESTION_THEN_REC.test(line) || ASK_PHRASE.test(line) || ASK_HEADER.test(line) || GRILL_QUESTION.test(line) || grilled && GRILL_ANSWER.test(line)) {
           return lines[i];
+        }
+      }
+      return "";
+    }
+    function doneLine(msg) {
+      if (typeof msg !== "string" || !msg) return "";
+      const text = stripNoise(msg);
+      if (askLine(text, true) || DONE_BLOCKER.test(normalize(text))) return "";
+      const lines = text.split("\n").map((l) => l.trim()).filter((l) => l && !PATH_LINE.test(l));
+      for (const line of lines.slice(-2)) {
+        for (const sentence of normalize(line).split(/(?<=[.!?:;])\s+/)) {
+          const self = SELF_CLOSE.test(sentence);
+          const rest = sentence.replace(SELF_CLOSE, "closes");
+          if ((self || DONE_PHRASE.test(rest)) && !NOT_YET.test(rest)) return line;
         }
       }
       return "";
@@ -1220,6 +1242,8 @@ var require_stop_classifier = __commonJS({
       if (normalize(msg).includes(normalize(CLOSE_PHRASE))) {
         return { state: "done", reason: "close-phrase", detail: firstLine(msg) };
       }
+      const finished = doneLine(msg);
+      if (finished) return { state: "done", reason: "done-phrase", detail: cap(finished) };
       return { state: "needs-you", reason: "stop", detail: firstLine(msg) };
     }
     module2.exports = { classifyStop: classifyStop2, entryOrigin, asksUser, CLOSE_PHRASE, MAX_DETAIL };
@@ -1284,7 +1308,7 @@ var require_attention_state = __commonJS({
     var SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
     var CARRY_OVER = ["cwd", "configDir", "claudePid", "shellPid", "transcriptPath"];
     var NOTIFY_STATES = /* @__PURE__ */ new Set(["needs-you", "done"]);
-    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase"]);
+    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase", "done-phrase"]);
     function getAttentionDir() {
       return path2.join(os2.homedir(), ".claude-shared", "session-attention");
     }

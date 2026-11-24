@@ -277,7 +277,7 @@ var require_attention_state = __commonJS({
     var SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
     var CARRY_OVER = ["cwd", "configDir", "claudePid", "shellPid", "transcriptPath"];
     var NOTIFY_STATES = /* @__PURE__ */ new Set(["needs-you", "done"]);
-    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase"]);
+    var STOP_REASONS = /* @__PURE__ */ new Set(["stop", "close-phrase", "done-phrase"]);
     function getAttentionDir() {
       return path2.join(os.homedir(), ".claude-shared", "session-attention");
     }

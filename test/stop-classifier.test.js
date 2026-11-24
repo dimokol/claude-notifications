@@ -213,3 +213,78 @@ test('a grilling question plus the close phrase is still needs-you', () => {
 test('without the close phrase, "needs your go" is still an ask', () => {
   assert.equal(classifyStop(stop('Built. Pushing it needs your go.'), []).state, 'needs-you');
 });
+
+// Done endings beyond the close phrase (2026-11-24). Explicit phrases only,
+// in the last 2 non-empty lines, and no ask anywhere in the message.
+const done = (msg) => classifyStop(stop(msg), []);
+
+test('done endings: self-close, nothing open, safe to close, handoff', () => {
+  for (const msg of [
+    'Cleaned up the worktree.\n\nThis tab closes when this reply ends.',
+    'Release is live.\n\nNothing else is open: 2.1.323 is verified. This tab closes when this turn ends.',
+    'Removed the mocks.\nThis session closes when this turn ends.',
+    'This tab closes when this reply finishes.',
+    'Done. This tab closes as soon as this message ends.',
+    'All committed.\n\nNo open loops left in this session.',
+    'Docs updated.\n\nNothing is left open here.',
+    'The sleep finished with exit code 0. Nothing else is pending.',
+    'Safe to close. Nothing is open from this session.',
+    'Everything is saved in docs/, so this session is safe to close.',
+    'Handed off to a fresh tab.\n/Users/dimokol/.claude-shared/state/handoffs/2026-11-24-1200-abc.md',
+    'I handed off to a new tab, and this session closes when this turn ends.',
+  ]) {
+    assert.deepEqual(done(msg).state, 'done', msg);
+    assert.equal(done(msg).reason, 'done-phrase', msg);
+  }
+});
+
+test('done endings: a trailing path or Tip block does not push the phrase out', () => {
+  assert.equal(done('Work saved.\n\nNothing is left open here.\n\n---\n**Tip:** say what you want first.').state, 'done');
+  assert.equal(done('Nothing is open on my side.\n/Users/dimokol/x/report.md').state, 'done');
+});
+
+test('done endings: detail is the line with the phrase', () => {
+  assert.equal(done('Long report first.\n\nThis tab closes when this reply ends.').detail, 'This tab closes when this reply ends.');
+});
+
+test('done endings: the phrase must be in the last 2 lines', () => {
+  assert.equal(done('This tab is safe to close once the new session posts.\n1. Storage\n2. Full Disk Access\n3. spawn-session').state, 'needs-you');
+  assert.equal(done('```\nprompt: tell him the old tab is safe to close\n```\nThis prompt covers only my session.').state, 'needs-you');
+});
+
+test('done endings: any ask anywhere in the message blocks done', () => {
+  for (const msg of [
+    '**For you to decide:** I can add one line to your CLAUDE.md.\n\nThis session closes when this turn ends.',
+    'All saved, safe to close.\n\n**One ask:** paste what you sent to Ada.',
+    'Should I also delete the branch?\n\nA lot more text here.\n'.padEnd(900, 'x') + '\nNothing else is open.',
+    'Whether to ship is your call.\nNothing else is open.',
+    'The merge is up to you.\nNo open loops.',
+    'The PRs still need your go. This session is safe to close.',
+    'Still waiting for your review of #12.\nNothing is left open here.',
+    'Decide: A or B.\nNothing else is open.',
+    // Replay 2026-11-24: a sibling session still waited on him.
+    'The design session still needs you to paste the resume command from my last message. Nothing else is open from this session, so you can close it.',
+    'You still need to run the migration.\nNothing else is open.',
+    'You\'ll have to approve the PR.\nNo open loops.',
+  ]) assert.equal(done(msg).state, 'needs-you', msg);
+});
+
+test('done endings: an optional offer does not block done', () => {
+  assert.equal(done('Cleanup finished. If you want more room, say the word and I\'ll ask that session.\nThe session is safe to close.').state, 'done');
+  assert.equal(done('If you want, I can delete the remote branch later.\nNothing else is open.').state, 'done');
+});
+
+test('done endings: negations and plans are not done', () => {
+  for (const msg of [
+    'Not safe to close yet: the build is still running.',
+    'It is not safe to close this tab.',
+    'Once the PR merges, nothing is left open.\nI will report back.',
+    'There are open loops left.',
+    'Nothing is left open on the server side, but the client still fails.\nI need to look at the client next.',
+  ]) assert.equal(done(msg).state, 'needs-you', msg);
+});
+
+test('done endings: background work and a pending peer still win', () => {
+  assert.equal(classifyStop(stop('Nothing else is open.', { background_tasks: [{ description: 'x' }] }), []).state, 'waiting');
+  assert.equal(classifyStop(stop('Nothing else is open.'), [human(), post({ room: 'r', from: 'me', to: 'p', message: 'hi' })]).state, 'waiting');
+});
