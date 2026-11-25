@@ -25,7 +25,7 @@ const {
   getStateDir
 } = require('./lib/state-paths');
 const { markResolved } = require('./lib/stage-dedup');
-const { parseClickMarker } = require('./lib/click-marker');
+const { normalizeHost, parseClickMarker, shouldOpenClaudeSession } = require('./lib/click-marker');
 const { matchTerminal } = require('./lib/terminal-match');
 const { isCustomTerminalName, writeTerminalNamesCache, NAME_CACHE_HEARTBEAT_MS } = require('./lib/terminal-names');
 const { checkHookStatus, checkAllProfiles, installHooks, uninstallHooks, discoverProfiles } = require('./lib/hooks-installer');
@@ -46,6 +46,7 @@ const POLL_MS = 400;
 const SWEEP_FIRED_MS = 8000;        // delete fired signal files older than this
 const LEGACY_EXTENSION_ID = 'dimokol.claude-terminal-focus';
 const CONFIG_FILE = 'claude-notifications-config.json';
+const CLAUDE_CODE_OPEN_SESSION_COMMAND = 'claude-vscode.primaryEditor.open';
 
 // Module-level shared state (set during activate)
 let _statusBarItem = null;
@@ -469,7 +470,7 @@ function buildToastMessage(signal, matchedCustomName = '') {
  * banner click — no file mediation, just the marker payload in the URI.
  *
  * Mirrors handleClickedSignal's marker-driven branch (decode → build target
- * → focusMatchingTerminal → markResolved) but takes the marker straight
+ * → focusClickTarget → markResolved) but takes the marker straight
  * from the query string instead of reading the clicked file.
  */
 async function handleVsCodeUriClick(uri, log) {
@@ -504,6 +505,7 @@ async function handleVsCodeUriClick(uri, log) {
     event: payload.event || 'waiting',
     project: payload.project || 'Claude Code',
     aiTitle: payload.aiTitle || '',
+    host: normalizeHost(payload.host),
     source: 'uri'
   };
 
@@ -518,8 +520,8 @@ async function handleVsCodeUriClick(uri, log) {
 
   const sessionTag = target.sessionId ? target.sessionId.slice(0, 8) : '?';
   const titleSuffix = target.aiTitle ? `, title="${target.aiTitle}"` : '';
-  log.appendLine(`Click-to-focus [uri] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]${titleSuffix}`);
-  await focusMatchingTerminal(target, log);
+  log.appendLine(`Click-to-focus [uri] — event=${target.event}, session=${sessionTag}, project=${target.project}, host=${target.host}, pids=[${target.pids.join(',')}]${titleSuffix}`);
+  await focusClickTarget(target, log);
   if (workspaceRoot && target.sessionId) markResolved(workspaceRoot, target.sessionId);
   // NOTE: We deliberately do NOT try to bring VS Code's window to the
   // foreground here. On Windows, a toast click runs with ShellExperienceHost
@@ -593,8 +595,8 @@ async function handleClickedSignal(workspaceRoot, log) {
 
   const sessionTag = target.sessionId ? target.sessionId.slice(0, 8) : '?';
   const titleSuffix = target.aiTitle ? `, title="${target.aiTitle}"` : '';
-  log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, pids=[${target.pids.join(',')}]${titleSuffix}`);
-  await focusMatchingTerminal(target, log);
+  log.appendLine(`Click-to-focus [${target.source}] — event=${target.event}, session=${sessionTag}, project=${target.project}, host=${target.host || 'terminal'}, pids=[${target.pids.join(',')}]${titleSuffix}`);
+  await focusClickTarget(target, log);
   markResolved(workspaceRoot, target.sessionId);
 }
 
@@ -705,6 +707,23 @@ async function describeTerminalForMatch(terminal, index) {
     }
   } catch (_) {}
   return { index, name: terminal.name || '', pid, cwd };
+}
+
+/**
+ * Sessions hosted by the Claude Code extension have no terminal; open their
+ * editor panel instead. Falls back to terminal focus if the command fails.
+ */
+async function focusClickTarget(target, log) {
+  if (shouldOpenClaudeSession(target)) {
+    try {
+      await vscode.commands.executeCommand(CLAUDE_CODE_OPEN_SESSION_COMMAND, target.sessionId);
+      log.appendLine(`Opened Claude Code session ${target.sessionId.slice(0, 8)} in the editor panel`);
+      return;
+    } catch (e) {
+      log.appendLine(`Opening Claude Code session failed - ${e.message}; falling back to terminal focus`);
+    }
+  }
+  await focusMatchingTerminal(target, log);
 }
 
 /**

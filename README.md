@@ -25,14 +25,9 @@ Works on **macOS**, **Windows**, and **Linux**, across multiple VS Code windows 
 
    If you ever need to re-run setup: `Ctrl/Cmd+Shift+P` → **"Claude Notifications: Set Up Claude Code Hooks"**.
 
-## What's New in v3.9.0
+## What's New in v3.10.0
 
-- **Fewer, better notifications.** You hear from a session only when it needs you (a question, a permission prompt, its turn is your move) or says it's done. Subagents finishing, background wake-ups and sessions still waiting on another session stay quiet. A question at the end of a message always notifies.
-- **Tab marks with Terminal Resume.** Each session's state is written to `~/.claude-shared/session-attention/`, which Terminal Resume uses to mark the tabs that need you.
-
-## What's New in v3.8.0
-
-- **No more double banners when another app runs Claude for you.** Hosts that spawn `claude` with your config dir (OctoShell and the like) can set `CLAUDE_NOTIFICATIONS_SKIP=1` in the CLI's environment and this extension stays quiet for those sessions, leaving the host to notify you. `OCTOSHELL_AGENT=1` works too, so OctoShell needs no configuration.
+- **Click a notification to open the session's Claude panel (Windows).** For a session running in the Claude Code VS Code extension panel, clicking its notification now opens that session's panel. Sessions running in a terminal behave as before.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history, including the v3.5.5 Windows reliability overhaul.
 

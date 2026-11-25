@@ -33,7 +33,7 @@ const { shouldNotify: checkShouldNotify } = require('./lib/stage-dedup');
 const { buildClickMarkerPayload } = require('./lib/click-marker');
 const { readAiTitle } = require('./lib/transcript-title');
 const { snapshot: processSnapshot, walkUp } = require('./lib/process-tree');
-const { schemeForBinaryName, classifyBuild } = require('./lib/code-build');
+const { schemeForBinaryName, classifyBuild, detectSessionHost } = require('./lib/code-build');
 const { classifyHookInput, extractQuestionText } = require('./lib/hook-input');
 const { readTerminalNamesCache, lookupCustomName } = require('./lib/terminal-names');
 const { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require('./lib/mac-code-cli');
@@ -256,6 +256,7 @@ function findClaudePid(chain, configDir) {
 
   const snap = processSnapshot();
   const chain = walkUp(snap, process.pid);
+  const sessionHost = detectSessionHost(chain);
   const pids = chain.map(n => n.pid);
   const pidNames = {};
   for (const node of chain) {
@@ -333,7 +334,7 @@ function findClaudePid(chain, configDir) {
     const tip = chain.length > 0 ? chain[chain.length - 1] : null;
     const tipDesc = tip ? `pid=${tip.pid} name=${tip.name || '?'}` : 'empty-chain';
     process.stderr.write(
-      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || 'none'} tip=${tipDesc}\n`
+      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || 'none'} tip=${tipDesc} host=${sessionHost}\n`
     );
   } catch (_) {}
 
@@ -558,7 +559,7 @@ function findClaudePid(chain, configDir) {
       // file last instead of the one whose banner the user actually clicked.
       const clickPayload = buildClickMarkerPayload({
         sessionId, pids, shellPid, workspaceRoot, projectDir,
-        event: hookEvent, project: projectName, aiTitle
+        event: hookEvent, project: projectName, aiTitle, host: sessionHost
       });
       // Publish the marker by rename so the extension's 400ms poll cannot
       // mistake a partial JSON write for a legacy/corrupt marker and focus a
@@ -668,7 +669,7 @@ function findClaudePid(chain, configDir) {
     const titleLine = bannerLabel ? `    <text>${xmlEsc(bannerLabel)}</text>` : '';
     const clickMarkerJson = buildClickMarkerPayload({
       sessionId, pids, shellPid, workspaceRoot, projectDir,
-      event: hookEvent, project: projectName, aiTitle
+      event: hookEvent, project: projectName, aiTitle, host: sessionHost
     });
     const clickMarkerB64 = Buffer.from(clickMarkerJson, 'utf8').toString('base64');
     // Pick the launch scheme that matches the owning VS Code build (#4).

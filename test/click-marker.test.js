@@ -3,8 +3,11 @@ const assert = require('node:assert');
 const {
   parseClickMarker,
   buildClickMarkerPayload,
-  CLICK_MARKER_STALE_MS
+  CLICK_MARKER_STALE_MS,
+  shouldOpenClaudeSession
 } = require('../lib/click-marker');
+
+const UUID = '123e4567-e89b-12d3-a456-426614174000';
 
 test('parseClickMarker returns legacy:true for empty marker (pre-v3.3.1 touch style)', () => {
   assert.deepStrictEqual(parseClickMarker(''), { legacy: true });
@@ -158,4 +161,33 @@ test('parseClickMarker defaults new fields when missing', () => {
   assert.strictEqual(parsed.shellPid, 0);
   assert.strictEqual(parsed.workspaceRoot, '');
   assert.strictEqual(parsed.projectDir, '');
+});
+
+test('click marker round-trips host extension', () => {
+  const parsed = parseClickMarker(buildClickMarkerPayload({ sessionId: UUID, host: 'extension' }));
+  assert.strictEqual(parsed.host, 'extension');
+});
+
+test('click marker defaults host to terminal when omitted, unknown, or legacy', () => {
+  assert.strictEqual(parseClickMarker(buildClickMarkerPayload({ sessionId: UUID })).host, 'terminal');
+  assert.strictEqual(parseClickMarker(buildClickMarkerPayload({ host: 'banana' })).host, 'terminal');
+  assert.strictEqual(parseClickMarker(JSON.stringify({ sessionId: UUID })).host, 'terminal');
+});
+
+test('shouldOpenClaudeSession is true for extension host with a uuid session', () => {
+  assert.strictEqual(shouldOpenClaudeSession({ host: 'extension', sessionId: UUID }), true);
+});
+
+test('shouldOpenClaudeSession is false for terminal host', () => {
+  assert.strictEqual(shouldOpenClaudeSession({ host: 'terminal', sessionId: UUID }), false);
+});
+
+test('shouldOpenClaudeSession is false for non-uuid session ids', () => {
+  assert.strictEqual(shouldOpenClaudeSession({ host: 'extension', sessionId: 'abc12345' }), false);
+  assert.strictEqual(shouldOpenClaudeSession({ host: 'extension', sessionId: '../x' }), false);
+});
+
+test('shouldOpenClaudeSession is false for missing target', () => {
+  assert.strictEqual(shouldOpenClaudeSession(null), false);
+  assert.strictEqual(shouldOpenClaudeSession(undefined), false);
 });

@@ -6,8 +6,11 @@ const {
   classifyBuild,
   schemeForBinaryName,
   cliForBinaryName,
-  resolveCodeCli
+  resolveCodeCli,
+  detectSessionHost
 } = require('../lib/code-build');
+
+const node = (name, i = 0) => ({ pid: 100 + i, ppid: 101 + i, name });
 
 test('classifyBuild identifies each build from its binary basename', () => {
   assert.equal(classifyBuild('Code.exe'), 'stable');
@@ -79,4 +82,37 @@ test('resolveCodeCli: nothing on PATH returns the fallback', () => {
 test('resolveCodeCli: empty opts returns code', () => {
   assert.equal(resolveCodeCli(), 'code');
   assert.equal(resolveCodeCli({}), 'code');
+});
+
+test('detectSessionHost returns extension when claude is directly parented by a VS Code build', () => {
+  for (const editor of ['Code.exe', 'Code - Insiders.exe', 'Cursor.exe', 'VSCodium.exe', 'Windsurf.exe']) {
+    assert.strictEqual(detectSessionHost([node('node.exe'), node('claude.exe', 1), node(editor, 2)]), 'extension', editor);
+  }
+});
+
+test('detectSessionHost matches claude and editor names case-insensitively', () => {
+  assert.strictEqual(detectSessionHost([node('node.exe'), node('CLAUDE.EXE', 1), node('code.exe', 2)]), 'extension');
+});
+
+test('detectSessionHost matches path-qualified names', () => {
+  const chain = [node('node.exe'), node('C:\\x\\claude.exe', 1), node('C:\\y\\Code.exe', 2)];
+  assert.strictEqual(detectSessionHost(chain), 'extension');
+});
+
+test('detectSessionHost returns terminal when a shell sits between claude and the editor', () => {
+  const chain = [node('node.exe'), node('claude.exe', 1), node('pwsh.exe', 2), node('Code.exe', 3)];
+  assert.strictEqual(detectSessionHost(chain), 'terminal');
+});
+
+test('detectSessionHost returns terminal when there is no claude node', () => {
+  assert.strictEqual(detectSessionHost([node('node.exe'), node('Code.exe', 1)]), 'terminal');
+});
+
+test('detectSessionHost returns terminal when claude is the last node', () => {
+  assert.strictEqual(detectSessionHost([node('node.exe'), node('claude.exe', 1)]), 'terminal');
+});
+
+test('detectSessionHost returns terminal for empty or non-array input', () => {
+  assert.strictEqual(detectSessionHost([]), 'terminal');
+  assert.strictEqual(detectSessionHost(null), 'terminal');
 });
