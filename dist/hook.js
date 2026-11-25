@@ -407,6 +407,10 @@ var require_stage_dedup = __commonJS({
 var require_click_marker = __commonJS({
   "lib/click-marker.js"(exports2, module2) {
     var CLICK_MARKER_STALE_MS = 60 * 60 * 1e3;
+    var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    function normalizeHost(host) {
+      return host === "extension" ? "extension" : "terminal";
+    }
     function parseClickMarker(content) {
       if (typeof content !== "string" || content.trim() === "") {
         return { legacy: true };
@@ -430,10 +434,14 @@ var require_click_marker = __commonJS({
         workspaceRoot: typeof data.workspaceRoot === "string" ? data.workspaceRoot : "",
         projectDir: typeof data.projectDir === "string" ? data.projectDir : "",
         aiTitle: typeof data.aiTitle === "string" ? data.aiTitle : "",
+        host: normalizeHost(data.host),
         timestamp: typeof data.timestamp === "number" ? data.timestamp : Date.now()
       };
     }
-    function buildClickMarkerPayload2({ sessionId, pids, shellPid, workspaceRoot, projectDir, event, project, aiTitle }) {
+    function shouldOpenClaudeSession(target) {
+      return !!target && target.host === "extension" && SESSION_ID_RE.test(target.sessionId);
+    }
+    function buildClickMarkerPayload2({ sessionId, pids, shellPid, workspaceRoot, projectDir, event, project, aiTitle, host }) {
       return JSON.stringify({
         sessionId: sessionId || "",
         event: event === "completed" ? "completed" : "waiting",
@@ -443,10 +451,11 @@ var require_click_marker = __commonJS({
         workspaceRoot: workspaceRoot || "",
         projectDir: projectDir || "",
         aiTitle: typeof aiTitle === "string" ? aiTitle : "",
+        host: normalizeHost(host),
         timestamp: Date.now()
       });
     }
-    module2.exports = { parseClickMarker, buildClickMarkerPayload: buildClickMarkerPayload2, CLICK_MARKER_STALE_MS };
+    module2.exports = { normalizeHost, parseClickMarker, buildClickMarkerPayload: buildClickMarkerPayload2, shouldOpenClaudeSession, CLICK_MARKER_STALE_MS };
   }
 });
 
@@ -675,8 +684,16 @@ var require_code_build = __commonJS({
       }
       return fallback;
     }
+    function detectSessionHost2(chain) {
+      if (!Array.isArray(chain)) return "terminal";
+      const i = chain.findIndex((p) => p && typeof p.name === "string" && /^claude(\.exe)?$/i.test(p.name.replace(/^.*[/\\]/, "")));
+      if (i === -1) return "terminal";
+      const parent = chain[i + 1];
+      return parent && classifyBuild2(parent.name) ? "extension" : "terminal";
+    }
     module2.exports = {
       BUILDS,
+      detectSessionHost: detectSessionHost2,
       CLI_PREFERENCE,
       classifyBuild: classifyBuild2,
       schemeForBinaryName: schemeForBinaryName2,
@@ -1383,7 +1400,7 @@ var { shouldNotify: checkShouldNotify } = require_stage_dedup();
 var { buildClickMarkerPayload } = require_click_marker();
 var { readAiTitle } = require_transcript_title();
 var { snapshot: processSnapshot, walkUp } = require_process_tree();
-var { schemeForBinaryName, classifyBuild } = require_code_build();
+var { schemeForBinaryName, classifyBuild, detectSessionHost } = require_code_build();
 var { classifyHookInput, extractQuestionText } = require_hook_input();
 var { readTerminalNamesCache, lookupCustomName } = require_terminal_names();
 var { isExecutable, normalizeEditorHost, readEditorHost, safeCliName } = require_mac_code_cli();
@@ -1566,6 +1583,7 @@ function findClaudePid(chain, configDir) {
   const clickedPath = getClickedPath(workspaceRoot);
   const snap = processSnapshot();
   const chain = walkUp(snap, process.pid);
+  const sessionHost = detectSessionHost(chain);
   const pids = chain.map((n) => n.pid);
   const pidNames = {};
   for (const node of chain) {
@@ -1616,7 +1634,7 @@ function findClaudePid(chain, configDir) {
     const tip = chain.length > 0 ? chain[chain.length - 1] : null;
     const tipDesc = tip ? `pid=${tip.pid} name=${tip.name || "?"}` : "empty-chain";
     process.stderr.write(
-      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || "none"} tip=${tipDesc}
+      `claude-notifications: chain depth=${chain.length} source=${snap.source} shellPid=${shellPid || "none"} tip=${tipDesc} host=${sessionHost}
 `
     );
   } catch (_) {
@@ -1775,7 +1793,8 @@ try {} finally { Remove-Item -LiteralPath '${tmpSoundScript.replace(/'/g, "''")}
           projectDir,
           event: hookEvent,
           project: projectName,
-          aiTitle
+          aiTitle,
+          host: sessionHost
         });
         const clickedTmpPath = `${clickedPath}.tmp.${process.pid}.${Date.now()}`;
         const writeClickMarker = `/usr/bin/printf '%s' ${shEsc(clickPayload)} > ${shEsc(clickedTmpPath)} && /bin/mv -f ${shEsc(clickedTmpPath)} ${shEsc(clickedPath)}`;
@@ -1818,7 +1837,8 @@ try {} finally { Remove-Item -LiteralPath '${tmpSoundScript.replace(/'/g, "''")}
       projectDir,
       event: hookEvent,
       project: projectName,
-      aiTitle
+      aiTitle,
+      host: sessionHost
     });
     const clickMarkerB64 = Buffer.from(clickMarkerJson, "utf8").toString("base64");
     let launchScheme = "vscode";

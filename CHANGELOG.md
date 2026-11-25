@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.10.0] - 2026-11-25
+
+### Added
+- **Windows: clicking a notification opens the session's Claude panel in the VS Code extension.** For a session running in the Claude Code VS Code extension (not a terminal), the click now opens that session's Claude panel via `claude-vscode.primaryEditor.open`. If the command is unavailable, it falls back to focusing the terminal as before.
+- **The hook records the session host in the click marker.** The host (`extension` or `terminal`) is detected from the process chain: `extension` when `claude` is spawned directly by the editor host. Older markers without `host` default to `terminal`.
+
 ## [3.9.0] - 2026-11-19
 
 ### Changed
