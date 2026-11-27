@@ -7,6 +7,7 @@ const path = require('path');
 require('./helpers');
 const {
   isCustomTerminalName,
+  cleanTerminalName,
   getTerminalNamesPath,
   writeTerminalNamesCache,
   readTerminalNamesCache,
@@ -50,6 +51,45 @@ test('empty/garbage names are not custom', () => {
   assert.equal(isCustomTerminalName('   '), false);
   assert.equal(isCustomTerminalName(null), false);
   assert.equal(isCustomTerminalName(42), false);
+});
+
+// --- status prefixes (VS Code ${progress} codicons, Terminal Resume park) ---
+
+test('cleanTerminalName strips leading codicons and the park glyph', () => {
+  assert.equal(cleanTerminalName('$(loading~spin) ◐ Tire v2'), '◐ Tire v2');
+  assert.equal(cleanTerminalName('$(alert) ✳ RX-7 round 2d'), '✳ RX-7 round 2d');
+  assert.equal(cleanTerminalName('$(error) deploy-bot'), 'deploy-bot');
+  assert.equal(cleanTerminalName('$(alert) $(bell) deploy-bot'), 'deploy-bot');
+  assert.equal(cleanTerminalName('💤 flw-docs-3c'), 'flw-docs-3c');
+  assert.equal(cleanTerminalName('$(alert) 💤 flw-docs-3c'), 'flw-docs-3c');
+  assert.equal(cleanTerminalName('  deploy-bot  '), 'deploy-bot');
+  assert.equal(cleanTerminalName('cost $(1) report'), 'cost $(1) report', 'only leading tokens');
+  assert.equal(cleanTerminalName(null), '');
+});
+
+test('busy Claude tabs (◐/◑) are not custom, with or without a codicon', () => {
+  const ctx = { aiTitle: '', project: 'tire-v2' };
+  assert.equal(isCustomTerminalName('◐ Tire v2 load sensitivity', ctx), false);
+  assert.equal(isCustomTerminalName('◑ Tire v2 load sensitivity', ctx), false);
+  assert.equal(isCustomTerminalName('$(loading~spin) ◐ Tire v2 load sensitivity', ctx), false);
+  assert.equal(isCustomTerminalName('$(alert) ✳ RX-7 round 2d', ctx), false);
+});
+
+test('codicon-only or codicon + shell names are not custom', () => {
+  assert.equal(isCustomTerminalName('$(alert)'), false);
+  assert.equal(isCustomTerminalName('$(loading~spin) zsh'), false);
+});
+
+test('a custom name behind a status prefix stays custom', () => {
+  assert.equal(isCustomTerminalName('$(error) deploy-bot'), true);
+  assert.equal(isCustomTerminalName('💤 flw-docs-3c'), true);
+});
+
+test('lookup returns the cleaned custom name', () => {
+  const cache = { names: { '10': '$(error) deploy-bot', '11': '💤 flw-docs-3c', '12': '$(loading~spin) ◐ Busy task' } };
+  assert.equal(lookupCustomName(cache, { shellPid: 10 }), 'deploy-bot');
+  assert.equal(lookupCustomName(cache, { shellPid: 11 }), 'flw-docs-3c');
+  assert.equal(lookupCustomName(cache, { shellPid: 12 }), '');
 });
 
 // --- cache round-trip ---

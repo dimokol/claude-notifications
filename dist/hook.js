@@ -753,7 +753,12 @@ var require_terminal_match = __commonJS({
       "git bash",
       "command prompt"
     ]);
-    var CLAUDE_TITLE_MARKERS = ["\u2733", "\u2692", "\u25A3", "\u273B"];
+    var CLAUDE_TITLE_MARKERS = ["\u2733", "\u2692", "\u25A3", "\u273B", "\u25D0", "\u25D1"];
+    var LEADING_STATUS_RE = /^\s*(?:(?:\$\([A-Za-z0-9~-]+\)|💤)\s*)*/u;
+    function cleanTerminalName(name) {
+      if (typeof name !== "string") return "";
+      return name.replace(LEADING_STATUS_RE, "").trim();
+    }
     var PROJECT_NAME_MIN_LEN = 4;
     function matchTerminal(terminals, signal) {
       if (!Array.isArray(terminals) || terminals.length === 0) return null;
@@ -821,8 +826,8 @@ var require_terminal_match = __commonJS({
       return null;
     }
     function isDefaultShellName(name) {
-      if (!name) return true;
-      const trimmed = name.trim().toLowerCase();
+      const trimmed = cleanTerminalName(name).toLowerCase();
+      if (!trimmed) return true;
       if (DEFAULT_SHELL_NAMES.has(trimmed)) return true;
       const stripped = trimmed.replace(/\s*\(\d+\)\s*$/, "");
       return DEFAULT_SHELL_NAMES.has(stripped);
@@ -836,6 +841,7 @@ var require_terminal_match = __commonJS({
     module2.exports = {
       matchTerminal,
       isDefaultShellName,
+      cleanTerminalName,
       normalizePath,
       DEFAULT_SHELL_NAMES,
       CLAUDE_TITLE_MARKERS
@@ -849,13 +855,13 @@ var require_terminal_names = __commonJS({
     var fs2 = require("fs");
     var path2 = require("path");
     var { getStateDir: getStateDir2 } = require_state_paths();
-    var { isDefaultShellName, CLAUDE_TITLE_MARKERS } = require_terminal_match();
+    var { isDefaultShellName, cleanTerminalName, CLAUDE_TITLE_MARKERS } = require_terminal_match();
     var NAME_CACHE_HEARTBEAT_MS = 60 * 1e3;
     var NAME_CACHE_STALE_MS = 5 * 60 * 1e3;
     var MAX_CUSTOM_NAME_LEN = 60;
     function isCustomTerminalName(name, { aiTitle = "", project = "" } = {}) {
       if (typeof name !== "string") return false;
-      const trimmed = name.trim();
+      const trimmed = cleanTerminalName(name);
       if (!trimmed) return false;
       if (isDefaultShellName(trimmed)) return false;
       for (const marker of CLAUDE_TITLE_MARKERS) {
@@ -901,7 +907,7 @@ var require_terminal_names = __commonJS({
         if (!pid) return "";
         const name = cache.names[String(pid)];
         if (typeof name !== "string" || !isCustomTerminalName(name, ctx)) return "";
-        const trimmed = name.trim();
+        const trimmed = cleanTerminalName(name);
         return trimmed.length > MAX_CUSTOM_NAME_LEN ? trimmed.slice(0, MAX_CUSTOM_NAME_LEN - 1) + "\u2026" : trimmed;
       };
       const fromShell = tryPid(shellPid);
@@ -914,6 +920,7 @@ var require_terminal_names = __commonJS({
     }
     module2.exports = {
       isCustomTerminalName,
+      cleanTerminalName,
       getTerminalNamesPath,
       writeTerminalNamesCache,
       readTerminalNamesCache: readTerminalNamesCache2,

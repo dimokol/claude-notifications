@@ -27,7 +27,7 @@ const {
 const { markResolved } = require('./lib/stage-dedup');
 const { parseClickMarker } = require('./lib/click-marker');
 const { matchTerminal } = require('./lib/terminal-match');
-const { isCustomTerminalName, writeTerminalNamesCache, NAME_CACHE_HEARTBEAT_MS } = require('./lib/terminal-names');
+const { isCustomTerminalName, cleanTerminalName, writeTerminalNamesCache, NAME_CACHE_HEARTBEAT_MS } = require('./lib/terminal-names');
 const { checkHookStatus, checkAllProfiles, installHooks, uninstallHooks, discoverProfiles } = require('./lib/hooks-installer');
 const { installHookRuntime, uninstallHookRuntime, getWrapperHookPath, getWrapperUserPromptPath } = require('./lib/hook-runtime');
 const { resolveMacCodeCli, writeEditorHost } = require('./lib/mac-code-cli');
@@ -399,7 +399,7 @@ async function handleSignal(signalPath, workspaceRoot, log) {
     if (m) {
       const d = allDescs[m.index];
       if (d && isCustomTerminalName(d.name, { aiTitle: signal.aiTitle, project: signal.project })) {
-        matchedCustomName = d.name.trim();
+        matchedCustomName = cleanTerminalName(d.name);
       }
     }
     const activeIndex = activeTerminal ? allTerminals.indexOf(activeTerminal) : -1;

@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.9.1] - 2026-11-26
+
+### Fixed
+- **Clean session names on notifications.** With `terminal.integrated.tabs.title` set to show `${progress}`, VS Code puts icons like `$(loading~spin)` or `$(alert)` into the tab name, and newer Claude Code marks a busy tab with `◐` / `◑`. Those tabs were mistaken for user-renamed ones, so a banner could read "$(loading~spin) ◐ Tire v2 load sensitivity". Busy Claude tabs now fall back to the AI session title, and a tab you renamed yourself shows without the status icon or Terminal Resume's `💤` parked prefix.
+
 ## [3.9.0] - 2026-11-19
 
 ### Changed
